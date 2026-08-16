@@ -63,5 +63,9 @@ for m in messages:
     lines.append(
         "#%s %s: %s" % (m.get("seq"), m.get("from"), (m.get("body") or "").strip())
     )
-print(json.dumps({"decision": "block", "reason": "\n\n".join(lines)}, ensure_ascii=False))
+# block은 사용자 화면에 "Stop hook blocking error"로 표시된다. 전달은
+# 되지만 오류처럼 보이므로 제품으로 쓸 수 없다. 끄고 기록만 남긴다.
+with open(os.path.join(os.path.expanduser("~"), ".dispatch", "undelivered.log"), "a") as fh:
+    fh.write("\n\n".join(lines) + "\n---\n")
+print("{}")
 PY
