@@ -1,39 +1,67 @@
 #!/bin/sh
-# Dispatch hook 프로토타입.
+# Dispatch hook.
 #
-# cmux가 하는 일을 직접 해보려는 것이다. cmux는 ~/.cmux/hooks에 같은 모양의
-# 스크립트를 깔아 두고 표준 hook 이벤트를 받아 세션 정보를 파일에 모은다.
-# 여기서 확인하려는 것은 둘이다.
-#   1. hook만으로 세션을 발견할 수 있는가 (sessionId·pid·cwd·tty)
-#   2. stop hook의 출력이 에이전트 컨텍스트에 들어가는가
+# cmux 없이도 에이전트 세션을 발견하고 메시지를 전하려는 것이다. 표준 hook
+# 이벤트만 쓰므로 cmux와 공존하고, cmux가 없는 환경에서도 그대로 동작한다.
 #
-# 계약: stdin으로 JSON payload를 받고 stdout으로 JSON을 돌려준다.
+# stop hook이 decision block과 reason을 돌려주면 그 reason이 에이전트 컨텍스트에
+# 들어간다는 것을 확인했다. 그래서 pager를 터미널에 찍어 넣지 않는다. 터미널에
+# 아무것도 넣지 않으므로 입력 안전성(명세 3.4)이 걸리는 지점이 없다.
+#
+# 전달은 읽기만 한다. 채팅 타임라인에는 아무것도 남기지 않는다.
 set -u
 event="${1:-unknown}"
+repo="$(cd "$(dirname "$0")/../.." && pwd)"
 store="${DISPATCH_HOOK_STORE:-$HOME/.dispatch}"
 mkdir -p "$store" 2>/dev/null || true
 
 payload="$(cat 2>/dev/null || true)"
 
-# 무엇이 오는지 그대로 남긴다. 필드 이름을 추측하지 않기 위해서다.
-printf '%s\n' "{\"event\":\"$event\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"pid\":$PPID,\"tty\":\"$(ps -o tty= -p $PPID 2>/dev/null | tr -d ' ')\",\"payload\":$payload}" \
+printf '%s\n' "{\"event\":\"$event\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"payload\":$payload}" \
   >> "$store/hook-events.jsonl" 2>/dev/null || true
 
-# stop hook의 출력이 에이전트 컨텍스트에 들어가는지 확인한다. 들어간다면
-# pager를 터미널에 찍어 넣을 이유가 사라진다.
-#
-# stop_hook_active가 참이면 이미 한 번 막은 뒤라 그대로 통과시킨다. 이 장치가
-# 없으면 막을 때마다 다시 stop이 걸려 끝나지 않는다.
-if [ "$event" = "stop" ]; then
-  active="$(printf '%s' "$payload" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("stop_hook_active", True))
-except Exception: print(True)' 2>/dev/null || echo True)"
-  if [ "$active" = "False" ]; then
-    # 실증 끝. 여기에 dispatch inbox 결과를 실으면 pager가 필요 없어진다.
-    # 프로브 문구는 새 세션마다 끼어들므로 꺼 둔다.
-    :
-    exit 0
-  fi
+if [ "$event" != "stop" ]; then
+  echo '{}'
+  exit 0
 fi
 
-echo '{}'
+# stop_hook_active가 참이면 이미 한 번 막은 뒤다. 다시 막으면 끝나지 않는다.
+DISPATCH_REPO="$repo" python3 - "$payload" <<'PY' 2>/dev/null || echo '{}'
+import json, os, subprocess, sys
+
+try:
+    payload = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+except Exception:
+    payload = {}
+
+if payload.get("stop_hook_active", True):
+    print("{}")
+    raise SystemExit
+
+repo = os.environ.get("DISPATCH_REPO", ".")
+cli = os.path.join(repo, ".venv", "bin", "dispatch")
+if not os.access(cli, os.X_OK):
+    print("{}")
+    raise SystemExit
+
+try:
+    done = subprocess.run(
+        [cli, "inbox"], cwd=repo, capture_output=True, text=True, timeout=20
+    )
+    # inbox는 stdout에 JSON 하나만 낸다. 안내는 stderr로 나간다.
+    data = json.loads(done.stdout.strip().splitlines()[-1])
+    messages = data.get("messages") or []
+except Exception:
+    messages = []
+
+if not messages:
+    print("{}")
+    raise SystemExit
+
+lines = ["[dispatch] 새 메시지 %d건이다. 답은 dispatch reply로 보낸다." % len(messages)]
+for m in messages:
+    lines.append(
+        "#%s %s: %s" % (m.get("seq"), m.get("from"), (m.get("body") or "").strip())
+    )
+print(json.dumps({"decision": "block", "reason": "\n\n".join(lines)}, ensure_ascii=False))
+PY
