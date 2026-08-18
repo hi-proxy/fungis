@@ -192,18 +192,46 @@ struct BoardSheet: View {
         payload.hasPrefix("move:") ? String(payload.dropFirst(5)) : nil
     }
 
-    private static func linked(_ payload: String) -> String? {
-        payload.hasPrefix("link:") ? String(payload.dropFirst(5)) : nil
+    /// 왼쪽이 선행이고 오른쪽이 후행이다. 오른쪽 점을 누르면 잡히고, 다른
+    /// 카드의 왼쪽 점을 누르면 그 카드가 이것을 기다린다.
+    ///
+    /// 끄는 방식을 두 번 시도했고 두 번 다 안 됐다. 카드가 통째로 draggable이라
+    /// 점의 드래그가 계속 먹혔다. 누르는 것은 그런 경쟁이 없다. 방향은 여전히
+    /// 점의 좌우가 말한다.
+    @ViewBuilder
+    private func linkHandle(_ node: BoardNode, leading: Bool) -> some View {
+        let armed = linking != nil && linking?.id != node.id
+        let isSource = linking?.id == node.id
+        Button {
+            if leading {
+                guard let source = linking, source.id != node.id else { return }
+                Task {
+                    _ = await model.linkBoardNodes(nodeID: node.id, waitsFor: source.id)
+                    linking = nil
+                }
+            } else {
+                linking = isSource ? nil : node
+            }
+        } label: {
+            Circle()
+                .fill(handleColor(leading: leading, armed: armed, isSource: isSource))
+                .frame(width: leading && armed ? 12 : 9, height: leading && armed ? 12 : 9)
+                // hit-area: 9pt짜리 점은 손으로 못 맞춘다. 도형을 크게 준다.
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(leading ? !armed : false)
+        .help(
+            leading
+                ? "선행이 들어오는 자리. 잡은 카드가 있으면 여기를 누른다"
+                : (isSource ? "잡힘. 다시 누르면 놓는다" : "잡아서 이 뒤에 올 카드의 왼쪽 점을 누른다")
+        )
     }
 
-    /// 왼쪽이 선행이고 오른쪽이 후행이다. 오른쪽 점을 잡아 다른 카드에
-    /// 떨어뜨리면 그 카드가 이것을 기다린다. 방향을 글자로 설명하지 않아도
-    /// 손이 알게 한다.
-    private func linkHandle(_ node: BoardNode, leading: Bool) -> some View {
-        Circle()
-            .fill(leading ? Color.secondary.opacity(0.35) : Color.accentColor)
-            .frame(width: 9, height: 9)
-            .contentShape(Circle().inset(by: -6))
+    private func handleColor(leading: Bool, armed: Bool, isSource: Bool) -> Color {
+        if leading { return armed ? .green : .secondary.opacity(0.35) }
+        return isSource ? .green : .accentColor
     }
 
     /// 점은 카드 위에 얹지 않고 옆에 둔다. 카드가 통째로 draggable이라
@@ -213,8 +241,6 @@ struct BoardSheet: View {
             linkHandle(node, leading: true)
             nodeCardBody(node)
             linkHandle(node, leading: false)
-                .draggable("link:\(node.id)")
-                .help("끌어서 이 뒤에 올 카드에 놓는다")
         }
     }
 
@@ -237,7 +263,6 @@ struct BoardSheet: View {
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
             }
-            linkTargetHint(for: node)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -253,14 +278,9 @@ struct BoardSheet: View {
         .draggable("move:\(node.id)")
         // 받는 자리. 여기 떨어진 카드가 선행이고 이 카드가 기다린다.
         .dropDestination(for: String.self) { items, _ in
-            guard let payload = items.first else { return false }
-            if let sourceID = Self.linked(payload) {
-                guard sourceID != node.id else { return false }
-                Task { _ = await model.linkBoardNodes(nodeID: node.id, waitsFor: sourceID) }
-                return true
-            }
             // 카드 위에 떨어뜨려도 그 열로 옮겨진다. 카드가 열을 덮고 있어서
             // 여기서 안 받으면 카드마다 죽은 구역이 된다.
+            guard let payload = items.first else { return false }
             if let movedID = Self.moved(payload), movedID != node.id {
                 Task {
                     _ = await model.setBoardNodeStatus(nodeID: movedID, status: node.status)
@@ -305,27 +325,6 @@ struct BoardSheet: View {
         }
         .padding(8)
         .background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    /// 잇기를 누른 노드가 있으면, 나머지 노드가 "여기를 기다린다"로 바뀐다.
-    /// 선행은 기다리는 쪽의 것이라 방향이 헷갈리지 않게 문구로 못박는다.
-    @ViewBuilder
-    private func linkTargetHint(for node: BoardNode) -> some View {
-        if let source = linking, source.id != node.id {
-            HStack {
-                Spacer()
-                Button("\(source.title)가 이것을 기다림") {
-                    Task {
-                        _ = await model.linkBoardNodes(
-                            nodeID: source.id, waitsFor: node.id
-                        )
-                        linking = nil
-                    }
-                }
-                .font(.caption)
-                .buttonStyle(.borderedProminent)
-            }
-        }
     }
 
     // MARK: 소집
