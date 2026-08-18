@@ -214,8 +214,9 @@ Node registry는 Server SSOT의 대체 사본이 아니다.
 메시지 누락으로 읽어 불필요한 확인을 하게 된다. 이 제품은 맥락 없는 새 에이전트
 세션에게 반복해서 쓰이므로 안내로 보완하지 않는다.
 
-inbox·history·발신 echo의 번호, `history --after`와 `reply --in-reply-to`의
-입력, PM 화면의 메시지·핀·북마크 번호가 모두 표시 번호다. 저장된 참조는 전역
+inbox·history·발신 echo의 번호, `history --after`·`history --ref`의 입력,
+`reply`의 위치 인자와 `send`·`request`의 `--reply` 입력, PM 화면의 메시지·핀·
+북마크 번호가 모두 표시 번호다. 저장된 참조는 전역
 `seq`를 유지하고 경계에서만 변환한다.
 
 본문은 최대 20,000자다. 초과 본문은 자르지 않고 요청을 거절한다. 성공 응답은 실제로
@@ -229,7 +230,7 @@ Server에 메시지 저장
 → 담당 Node가 event를 로컬 pending에 영속 저장
 → received ACK
 → safe gate 통과 시 고정 pager 한 번 전송
-→ 에이전트가 dispatch inbox/history 조회
+→ 에이전트가 fungis inbox/history 조회
 → 해당 세션 claim 기록
 → 같은 세션의 정상 턴 완료 확인
 → processed ACK
@@ -238,7 +239,7 @@ Server에 메시지 저장
 고정 pager는 다음 의미만 가진다.
 
 ```text
-[dispatch] inbox — run: dispatch inbox
+[fungis] inbox — run: fungis inbox
 ```
 
 서버 URL, registry 경로, recipient ID, 메시지 본문을 터미널에 삽입하지 않는다.
@@ -312,8 +313,8 @@ Dispatch에서 답할 수 있어야 한다. 터미널을 계속 띄워 두지 �
 - 역할은 PM 소유의 원문 onboarding prompt를 가질 수 있다.
 - assignment 시 체크한 경우에만 한 번 전달한다.
 - 동일 assignment 요청의 재시도는 중복 전달하지 않는다.
-- 역할 안내와 Dispatch 도구 사용법은 분리한다.
-- Dispatch 사용법은 짧은 `dispatch init --project ...` 호출 뒤 bootstrap API에서 읽는다.
+- 역할 안내와 CLI 사용법은 분리한다.
+- CLI 사용법은 짧은 `fungis init --project ...` 호출 뒤 bootstrap API에서 읽는다.
 
 ## 8. Chat UI 계약
 

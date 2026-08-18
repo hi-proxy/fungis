@@ -86,15 +86,17 @@ fungis board start ARCH-12
 fungis board done ARCH-12
 fungis board wait ARCH-12 MEI-31    ARCH-12가 MEI-31을 기다린다
 fungis board unwait ARCH-12 MEI-31
-fungis ask ARCH "..."               그 방 lead에게 묻는다
+fungis send --project HQ --to ARCH "..."    그 방 lead에게 묻는다
 ```
 
 이름은 `ARCH-12`도 `12`도 받는다. 맨 숫자는 내 방으로 읽는다. 남의 방 티켓을
 맨 숫자로 부르면 어느 방인지 알 수 없으므로 거절하고 알려진 티켓을 전부 보여준다 — 조용히
 아무거나 고르면 엉뚱한 방의 일이 바뀐다.
 
-`ask`는 프리픽스를 그대로 받는다. `blockedBy ARCH-12`를 읽은 자리에서 `ARCH`를
-떼어 바로 쓸 수 있어야 한다. 한 번 더 대조하게 만들면 거기서 착오가 난다.
+`--project`도 `--to`도 프리픽스를 그대로 받는다. `blockedBy ARCH-12`를 읽은
+자리에서 `ARCH`를 떼어 바로 쓸 수 있어야 한다. 한 번 더 대조하게 만들면 거기서
+착오가 난다. 예전에는 이 자리에 `ask`가 있었으나 없앴다 — `send`가 같은 일을
+하고 낱말이 하나 줄었다. 나머지 명령은 [CLI.md](CLI.md)에 있다.
 
 ## 명령이 돌려주는 것
 

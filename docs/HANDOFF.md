@@ -5,19 +5,20 @@
 
 제품 명세: [PRODUCT_SPEC.md](PRODUCT_SPEC.md)
 보드 프로토콜: [BOARD_PROTOCOL.md](BOARD_PROTOCOL.md) — 에이전트가 보드를 읽고 쓰는 법
+에이전트 CLI: [CLI.md](CLI.md) — 동사 셋, 주소 넷, 자리별 기본 수신자
 저장소 상태: 로컬 Git repository, branch `cross-project`. 구현 기준 SHA는 아래 착지 정보에 기록한다.
 
 ## 읽는 순서
 
 1. 이 문서의 "제품 경계"와 "하지 말 것"
-2. `git show 63cf3b3` — 직전 웨이브가 무엇을 왜 바꿨는지 커밋 본문에 있다
+2. `git show d036ad2` — 직전 웨이브가 무엇을 왜 바꿨는지 커밋 본문에 있다
 3. 필요한 범위만 "주요 코드 위치"에서 찾는다
 
 ## Git 착지 정보
 
 - 원격 저장소: `git@github.com:hi-proxy/dispatch.git` (아직 push 하지 않음. 통짜 하나로 올린다)
 - 기준 branch: `cross-project`
-- 구현 기준 commit: `63cf3b3` (`fix: let HQ speak to everyone it convened`)
+- 구현 기준 commit: `d036ad2` (`feat: rebuild the agent CLI around three verbs and one way to address`)
 - 런타임 DB, `.venv`, Swift 빌드 산출물, 로컬 권한 설정은 Git에서 제외
 
 ## 제품 경계
@@ -81,7 +82,7 @@ Selected Project
 - agent local name을 server principal ID로 변환하는 Reply/Request와 프로젝트 문맥 기억
 - agent 공용 `history` 맥락 복원, 발신 저장 원문·track·tags echo, 무음절단 없는 20,000자 상한
 - inbox stdout 단일 JSON, 사람 안내 stderr 분리, claim 누락 시 history 복구 규칙
-- reply/request `--help`의 역할·track·tag·상속·프로젝트·저장 echo 예시
+- reply/send/request `--help`의 주소·track·tag·상속·기본 수신자·저장 echo 예시
 - reply/request 409의 `init` 선행 및 `history` 복구 안내
 - PM confirm/direct/reference/ambient 알림 구분
 - track, tags, reply context, 프로젝트 지정 Git의 실재 branch·commit만 허용하는 엄격 관심사 탐지·필터
@@ -120,13 +121,33 @@ Selected Project
 - 보드를 JSON이 아니라 줄 프로토콜로 읽는 `fungis board`. `blocks` 역방향을 같이
   실어 끝낸 직후에 누구에게 알릴지가 같은 줄에 있고, 모든 명령이 바뀐 줄 하나를
   돌려주므로 보드를 다시 읽지 않는다. `board start/done/wait/unwait`은 `ARCH-12`도
-  `12`도 받고 `ask`는 프리픽스를 그대로 받는다
+  `12`도 받고 방을 고르는 자리는 프리픽스를 그대로 받는다
 - 보드 첫 열은 `예정`. `대기`는 선행에 막힌 것만 가리킨다
 - HQ에서는 수신자를 지정하지 않는 것이 곧 전원이다. 받는 사람은 서버가 소집된
   방들의 lead 명부에서 채운다. 읽는 쪽도 같은 명부로 열리며, 소집되지 않은
   에이전트는 그대로 403이다
 - 한 터미널 창에 에이전트 하나. 새 세션이 창을 가져가면 앞의 것을 놓아준다
 - daemon이 내려가면 서버도 같이 내려간다
+- 수신자 없는 글. 일반 방에서는 그대로 저장되고 아무도 배달받지 않으며 아무도
+  깨어나지 않는다. 저장·조회·타임라인·웹소켓의 0명 경로를 테스트로 못박았다
+- 수신자 자리가 방 이름을 받는다. 아는 신원이 아니면 방 id·프리픽스·이름 순으로
+  풀어 그 방 lead에게 보낸다. HQ에서 남의 방을 지목하는 길이다
+- 방 안의 표시 번호로 글 하나를 꺼내는 `history --ref`. 열람 경계를 그대로 지난다.
+  받는 쪽 메시지에도 `in_reply_to`를 실어 참조 사슬을 따라갈 수 있다
+- 쓰기 권한 둘. 남의 방에 글을 쓰는 것은 그 방 소속만, 남의 방 명부를 보는 것은
+  lead만. 보드 쓰기는 그 방 lead와 PM으로 좁히고 읽기는 열어 둔다. 노드 수정과
+  간선 끊기는 actor를 필수로 받는다. 거절은 한 군데서 만들며 왜 막혔는지와 다음에
+  무엇을 할지를 같이 준다
+- 동사 셋으로 가른 에이전트 CLI. `reply`는 답하고 `send`는 자리에 붙이며
+  `request`는 요청한다. `reply`만 참조가 위치 인자고 `send`·`request`에서는
+  `--reply` 플래그다
+- 주소 넷으로 통일. `--to`·`--cc`가 역할을 받고 `--to-id`·`--cc-id`가 절대 id를
+  받는다. `--to`는 기본 수신자를 좁히며 더하지 않는다. 약자는 `-p -t -c` 셋뿐이다
+- 부작용 없이 처지만 읽는 `fungis state`. 역할을 가진 방 전부, 또는 한 방의
+  역할·담당자·lead. `NONE`은 값이 비었다는 뜻이고 `-`는 해당 없음이라는 뜻이다
+- 옛 문법은 별칭으로 남기지 않고 무엇으로 바뀌었는지 한 줄로 알려주고 멈춘다.
+  `ask`는 없앴다 — `send --project HQ --to <방>`이 같은 일을 한다. `init`이
+  돌려주는 사용법도 새 문법으로 바꿨다
 
 ## 실행
 
@@ -202,7 +223,7 @@ open FungisMac/build/Fungis.app
 
 ```bash
 .venv/bin/pytest -q
-# 130 passed
+# 160 passed
 
 cd FungisMac && swift test
 # 21 passed
