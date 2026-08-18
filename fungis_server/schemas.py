@@ -60,12 +60,6 @@ class MessageCreate(BaseModel):
     tags: list[str] | None = None
     inherit_context: bool = True
 
-    @model_validator(mode="after")
-    def has_recipient(self):
-        if not self.recipient_ids and not self.role_ids:
-            raise ValueError("at least one recipient or role is required")
-        return self
-
 
 class RoleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)

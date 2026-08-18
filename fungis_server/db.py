@@ -562,6 +562,28 @@ class FungisDB:
             ).fetchone()
             return row["kind"] if row else None
 
+    def is_hq(self, workspace_id: str) -> bool:
+        with self._lock:
+            return self._connection.execute(
+                "SELECT 1 FROM projects WHERE id = ? AND kind = 'hq'", (workspace_id,)
+            ).fetchone() is not None
+
+    def convened_leads(self) -> list[str]:
+        """소집된 방들의 lead 담당자. HQ의 명부다."""
+        with self._lock:
+            return [
+                row["agent_id"]
+                for row in self._connection.execute(
+                    """SELECT DISTINCT a.agent_id FROM workspace_roles r
+                       JOIN role_assignments a
+                         ON a.role_id = r.id AND a.ended_at IS NULL
+                       JOIN projects p ON p.id = r.workspace_id
+                       WHERE r.is_lead = 1 AND r.deleted_at IS NULL
+                         AND p.parent_id IS NOT NULL AND p.archived_at IS NULL
+                       ORDER BY a.agent_id"""
+                )
+            ]
+
     def workspace_participant(self, *, workspace_id: str, principal_id: str) -> bool:
         """이 사람이 그 방의 대화를 읽어도 되나.
 
@@ -571,6 +593,8 @@ class FungisDB:
         참가 = 역할 보유로 본다. 지금 모델에서 방에 있다는 것을 말하는 다른
         수단이 없다. 사람은 통과시킨다. PM은 어느 방에도 역할로 적혀 있지
         않지만 모든 방을 본다.
+
+        HQ만 규칙이 다르다. 거기 구성원은 역할이 아니라 소집된 방의 lead다.
 
         여기서 막는 것은 실수다. 신원은 자기 신고라 작정하면 우회된다.
         그건 서버가 이 기계를 벗어날 때 인증으로 풀 일이고, 그때 이 검사는
@@ -584,6 +608,26 @@ class FungisDB:
                 return False
             if row["kind"] == "human":
                 return True
+            # HQ에는 역할이 없다. 소집은 방을 붙이는 것이지 HQ에 역할을 만드는
+            # 것이 아니라, 역할 보유로만 보면 모든 에이전트가 막힌다. HQ의
+            # 구성원은 소집된 방의 lead다.
+            hq = self._connection.execute(
+                "SELECT 1 FROM projects WHERE id = ? AND kind = 'hq'", (workspace_id,)
+            ).fetchone()
+            if hq is not None and self._connection.execute(
+                    """SELECT 1 FROM workspace_roles r
+                       JOIN role_assignments a
+                         ON a.role_id = r.id AND a.ended_at IS NULL
+                       JOIN projects p ON p.id = r.workspace_id
+                       WHERE r.is_lead = 1 AND r.deleted_at IS NULL
+                         AND p.parent_id IS NOT NULL AND p.archived_at IS NULL
+                         AND a.agent_id = ?
+                       LIMIT 1""",
+                (principal_id,),
+            ).fetchone() is not None:
+                return True
+            # HQ에 직접 역할을 가진 경우는 그대로 통과한다. lead 규칙은 그 위에
+            # 더하는 것이지 대신하는 것이 아니다.
             return self._connection.execute(
                 """SELECT 1 FROM role_assignments
                    WHERE workspace_id = ? AND agent_id = ? AND ended_at IS NULL
@@ -1505,6 +1549,17 @@ class FungisDB:
         inherit_context: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         message_id = message_id or str(uuid.uuid4())
+        # HQ에는 역할이 없어서 받을 사람을 고를 목록 자체가 없다. 거기서 받는
+        # 사람은 소집된 방의 lead 전원이다. 고르게 하면 매번 전원을 고르게 되고
+        # 한 번 빠뜨리면 그 방만 못 본다.
+        if not recipient_ids and not role_ids:
+            if not self.is_hq(workspace_id):
+                # 방에서는 받을 사람을 말해야 한다. 안 그러면 아무도 못 받는
+                # 메시지가 조용히 저장된다.
+                raise ValueError("at least one recipient or role is required")
+            recipient_ids = self.convened_leads()
+            if not recipient_ids:
+                raise ValueError("no room has been convened yet")
         unique_recipients = list(dict.fromkeys(recipient_ids))
         unique_roles = list(dict.fromkeys(role_ids or []))
         unique_references = [

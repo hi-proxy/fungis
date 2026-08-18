@@ -440,6 +440,12 @@ struct ChatView: View {
 }
 
 private struct ChatComposer: View {
+    /// HQ에는 고를 역할이 없다. 거기 글은 소집된 lead 전원이 받으므로
+    /// 지정하지 않는 것이 곧 전원이다.
+    private var isHQ: Bool {
+        model.snapshot.projects.first { $0.id == model.selectedProjectID }?.isHQ == true
+    }
+
     @EnvironmentObject private var model: AppModel
     let tracks: [String]
     let gitBranches: [String]
@@ -507,7 +513,8 @@ private struct ChatComposer: View {
                 .disabled(
                     blockedBy != nil
                         || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || (!startsWithMention
+                        || (!isHQ
+                            && !startsWithMention
                             && model.selectedTargets.isEmpty
                             && model.selectedRoles.isEmpty)
                 )

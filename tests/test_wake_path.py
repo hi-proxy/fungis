@@ -134,3 +134,82 @@ def test_the_convene_list_is_not_shared_with_agents(tmp_path):
 
         # 노드는 그대로 공유한다.
         assert client.get("/v1/board").status_code == 200
+
+
+def convened_room(client, name, prefix, agent_id):
+    """방 하나를 만들고 lead를 세워 보드에 붙인다."""
+    project = client.post("/v1/projects", json={"name": name}).json()
+    role = client.post(
+        f"/v1/workspaces/{project['id']}/roles", json={"name": f"{name}-lead"}
+    ).json()
+    client.put(
+        f"/v1/roles/{role['id']}/assignment",
+        json={"agent_id": agent_id, "assigned_by": "pm", "send_onboarding": False},
+    )
+    client.put(f"/v1/roles/{role['id']}/lead", json={"is_lead": True})
+    client.put(
+        f"/v1/projects/{project['id']}/board-link", json={"hq_id": "hq"}
+    )
+    return project["id"]
+
+
+def test_hq_reaches_every_convened_lead_without_picking_anyone(tmp_path):
+    """HQ에는 고를 역할이 없다. 지정하지 않는 것이 곧 전원이다.
+
+    예전에는 받을 사람을 하나는 골라야 보낼 수 있었고, HQ에는 고를 것이
+    하나도 없어서 입력창이 영영 잠겨 있었다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        enroll(client, "pm", kind="human")
+        enroll(client, "lead-a")
+        enroll(client, "lead-b")
+        enroll(client, "not-a-lead")
+        convened_room(client, "archivia", "ARCH", "lead-a")
+        convened_room(client, "mei", "MEI", "lead-b")
+
+        client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "hq", "sender_id": "pm",
+                "recipient_ids": [], "body": "로드맵",
+            },
+        )
+
+        def inbox(agent_id):
+            return client.get(
+                "/v1/messages", params={"recipient": agent_id, "after": 0}
+            ).json()
+
+        assert [m["body"] for m in inbox("lead-a")] == ["로드맵"]
+        assert [m["body"] for m in inbox("lead-b")] == ["로드맵"]
+        # lead가 아닌 에이전트에게는 안 간다. 전원이란 소집된 방의 lead들이다.
+        assert inbox("not-a-lead") == []
+
+
+def test_a_lead_can_read_hq_even_though_it_holds_no_role_there(tmp_path):
+    """소집은 방을 붙이는 것이지 HQ에 역할을 만드는 것이 아니다.
+
+    역할 보유로만 참가를 보면 모든 에이전트가 HQ에서 403을 받는다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        enroll(client, "pm", kind="human")
+        enroll(client, "lead-a")
+        enroll(client, "stranger")
+        convened_room(client, "archivia", "ARCH", "lead-a")
+        client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "hq", "sender_id": "pm",
+                "recipient_ids": [], "body": "로드맵",
+            },
+        )
+
+        def read(caller):
+            return client.get("/v1/workspaces/hq/timeline", params={"caller": caller})
+
+        assert [m["body"] for m in read("lead-a").json()] == ["로드맵"]
+        assert read("pm").status_code == 200
+        # 소집되지 않은 에이전트는 여전히 막힌다. 경계는 그대로 있다.
+        assert read("stranger").status_code == 403
