@@ -92,6 +92,7 @@ struct BoardSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draftTitles: [String: String] = [:]
     @State private var linking: BoardNode?
+    @State private var dropTargetID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -205,7 +206,19 @@ struct BoardSheet: View {
             .contentShape(Circle().inset(by: -6))
     }
 
+    /// 점은 카드 위에 얹지 않고 옆에 둔다. 카드가 통째로 draggable이라
+    /// 얹으면 카드의 드래그가 점의 드래그를 먹는다. 그래서 잇기가 안 됐다.
     private func nodeCard(_ node: BoardNode) -> some View {
+        HStack(spacing: 3) {
+            linkHandle(node, leading: true)
+            nodeCardBody(node)
+            linkHandle(node, leading: false)
+                .draggable("link:\(node.id)")
+                .help("끌어서 이 뒤에 올 카드에 놓는다")
+        }
+    }
+
+    private func nodeCardBody(_ node: BoardNode) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(node.title).font(.callout).fixedSize(horizontal: false, vertical: true)
             if node.state == "waiting" {
@@ -232,8 +245,9 @@ struct BoardSheet: View {
         .overlay {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(
-                    linking?.id == node.id ? Color.accentColor : Color.secondary.opacity(0.15),
-                    lineWidth: linking?.id == node.id ? 2 : 1
+                    dropTargetID == node.id ? Color.green
+                        : (linking?.id == node.id ? Color.accentColor : Color.secondary.opacity(0.15)),
+                    lineWidth: dropTargetID == node.id || linking?.id == node.id ? 2 : 1
                 )
         }
         .draggable("move:\(node.id)")
@@ -254,15 +268,10 @@ struct BoardSheet: View {
                 return true
             }
             return false
-        }
-        .overlay(alignment: .leading) {
-            linkHandle(node, leading: true).offset(x: -4.5)
-        }
-        .overlay(alignment: .trailing) {
-            linkHandle(node, leading: false)
-                .offset(x: 4.5)
-                .draggable("link:\(node.id)")
-                .help("끌어서 이 뒤에 올 카드에 놓는다")
+        } isTargeted: { targeted in
+            // 받을 수 있는 자리인지 손이 알아야 한다. 놓아 보고 나서야 아는 건
+            // 안 되는 것과 구별이 안 된다.
+            dropTargetID = targeted ? node.id : (dropTargetID == node.id ? nil : dropTargetID)
         }
         .contextMenu {
             // 드래그가 안 되는 상황에도 길은 남긴다.
