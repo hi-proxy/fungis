@@ -112,7 +112,7 @@ enum BoardSummary {
         if track.nodes.contains(where: { $0.state == "active" }) { return "하는중" }
         if track.nodes.isEmpty { return "비어있음" }
         if track.nodes.allSatisfy({ $0.state == "done" }) { return "끝" }
-        return "안시작"
+        return "예정"
     }
 
     static func blockerNames(of node: BoardNode, in tracks: [BoardTrack]) -> [String] {
@@ -145,7 +145,7 @@ struct BoardSheet: View {
     @State private var onlyLinked = false
 
     private static let columns: [(status: String, title: String)] = [
-        ("todo", "안 시작"), ("active", "하는 중"), ("done", "끝"),
+        ("todo", "예정"), ("active", "하는 중"), ("done", "끝"),
     ]
 
     private static let trackWidth: CGFloat = 150
