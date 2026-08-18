@@ -118,7 +118,6 @@ struct BoardSheet: View {
                 ForEach(model.board.tracks) { track in
                     trackSection(track)
                 }
-                convene
             }
             .padding(20)
         }
@@ -222,86 +221,6 @@ struct BoardSheet: View {
     // 전체 목록을 보여주고 체크로 고른다. 안 붙은 것만 보여주면 지금 누가
     // 들어와 있는지가 안 보이고, lead 여부도 눌러봐야 안다.
 
-    private var candidates: [BoardCandidate] { model.board.candidates ?? [] }
-
-    private var convene: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider()
-            Text("소집").font(.headline)
-            ForEach(candidates) { candidate in
-                candidateRow(candidate)
-            }
-            if let message = model.errorMessage {
-                Text(message).font(.caption).foregroundStyle(.orange)
-            }
-        }
-    }
-
-    private func candidateRow(_ candidate: BoardCandidate) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                Toggle("", isOn: Binding(
-                    get: { candidate.connected },
-                    set: { on in
-                        Task {
-                            _ = on
-                                ? await model.connectTrack(projectID: candidate.id)
-                                : await model.disconnectTrack(projectID: candidate.id)
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .disabled(!candidate.canJoin && !candidate.connected)
-
-                Text(candidate.name)
-                Spacer()
-                if let lead = candidate.lead {
-                    Text("lead · \(lead.name)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("lead 없음")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-            // lead가 없으면 여기서 바로 세운다. 딴 화면으로 보내면 소집하다
-            // 말고 갔다가 돌아와서 다시 골라야 한다.
-            if candidate.lead == nil { leadPicker(candidate) }
-        }
-        .padding(.vertical, 2)
-    }
-
-    @ViewBuilder
-    private func leadPicker(_ candidate: BoardCandidate) -> some View {
-        if candidate.roles.isEmpty {
-            Text("배정된 역할이 없어 lead를 세울 수 없다")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 28)
-        } else {
-            HStack(spacing: 6) {
-                ForEach(candidate.roles) { role in
-                    Button(
-                        candidate.roles.count == 1
-                            ? "\(role.name)을 lead로"
-                            : role.name
-                    ) {
-                        Task { _ = await model.setRoleLead(roleID: role.id, isLead: true) }
-                    }
-                    .buttonStyle(.plain)
-                    // hit-area: 도형은 여백 바깥에 준다. 여백 안쪽에 주면
-                    // 캡슐은 큰데 글자만 눌리는 칩이 된다.
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.quaternary.opacity(0.4), in: Capsule())
-                    .contentShape(Capsule())
-                }
-            }
-            .padding(.leading, 28)
-        }
-    }
 
     private func draft(_ track: BoardTrack) -> String {
         (draftTitles[track.projectID] ?? "").trimmingCharacters(in: .whitespaces)

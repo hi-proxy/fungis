@@ -9,12 +9,51 @@ struct RolesView: View {
     @State private var historyRole: WorkspaceRole?
     @State private var deletingRole: WorkspaceRole?
     @State private var editingPM = false
+    @State private var showConvene = false
+
+    private var isHQ: Bool {
+        model.snapshot.projects.first { $0.id == model.selectedProjectID }?.isHQ == true
+    }
+
+    private var convened: [BoardCandidate] {
+        (model.board.candidates ?? []).filter(\.connected)
+    }
+
+    /// HQ에서는 이 자리가 소집된 방이다. lead를 카드에 적는다. 없으면 어디서
+    /// 세우는지까지 적는다 — 목록만 보고 왜 못 부르는지 몰라서는 안 된다.
+    private func convenedCard(_ candidate: BoardCandidate) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(candidate.name).font(.headline)
+            if let lead = candidate.lead {
+                Label("lead · \(lead.name)", systemImage: "star.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let agent = lead.agentName {
+                    Text(agent).font(.caption2).foregroundStyle(.tertiary)
+                }
+            } else {
+                Label("lead 없음", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                Text("소집에서 세운다").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Button("Add role", systemImage: "plus") { showCreate = true }
+                    // HQ의 구성원은 역할이 아니라 소집된 방이다. 자리는 같고
+                    // 뜻만 바뀐다.
+                    if isHQ {
+                        Button("소집", systemImage: "person.2.badge.plus") {
+                            showConvene = true
+                        }
+                    } else {
+                        Button("Add role", systemImage: "plus") { showCreate = true }
+                    }
                     Spacer()
                     Button("Initialize", systemImage: "sparkles") {
                         Task { await model.initializeChat() }
@@ -25,10 +64,19 @@ struct RolesView: View {
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
                     pmCard
-                    ForEach(model.snapshot.roles) { role in roleCard(role) }
+                    if isHQ {
+                        ForEach(convened) { candidate in convenedCard(candidate) }
+                    } else {
+                        ForEach(model.snapshot.roles) { role in roleCard(role) }
+                    }
                 }
 
-                if model.snapshot.roles.isEmpty {
+                if isHQ && convened.isEmpty {
+                    ContentUnavailableView(
+                        "소집된 방이 없다", systemImage: "person.2",
+                        description: Text("소집을 눌러 프로젝트를 부른다. 방마다 lead가 있어야 부를 수 있다.")
+                    ).frame(maxWidth: .infinity, minHeight: 240)
+                } else if !isHQ && model.snapshot.roles.isEmpty {
                     ContentUnavailableView(
                         "No roles", systemImage: "person.badge.key",
                         description: Text("front1처럼 계속 유지할 역할 주소를 만드세요.")
@@ -36,6 +84,7 @@ struct RolesView: View {
                 }
             }.padding(16)
         }
+        .sheet(isPresented: $showConvene) { ConveneSheet() }
         .sheet(isPresented: $showCreate) {
             RoleEditor(role: nil) { name, prompt in
                 if await model.createRole(name: name, onboardingPrompt: prompt) {
@@ -280,7 +329,10 @@ private struct AssignmentEditor: View {
         let current = agents.first { $0.principalID == role.agentID }
         let usable = agents.first { $0.connected || $0.bindingVerified }
         _surfaceID = State(initialValue: current?.surfaceID ?? usable?.surfaceID ?? "")
-        _sendOnboarding = State(initialValue: !role.onboardingPrompt.isEmpty)
+        // 역할 설명이 비어 있다고 꺼두면 배정 init이 통째로 안 나간다. 그러면
+        // 에이전트는 자기가 배정된 줄도 모르고 PM은 보냈다고 믿는다. 설명 유무는
+        // 덧붙일 문구가 있느냐일 뿐, 부를지 말지가 아니다.
+        _sendOnboarding = State(initialValue: true)
     }
 
     var body: some View {
@@ -295,8 +347,7 @@ private struct AssignmentEditor: View {
                     systemImage: "exclamationmark.triangle.fill"
                 ).font(.caption).foregroundStyle(.orange)
             }
-            Toggle("Send saved onboarding prompt once", isOn: $sendOnboarding)
-                .disabled(role.onboardingPrompt.isEmpty)
+            Toggle("Send the init call once", isOn: $sendOnboarding)
             if !role.onboardingPrompt.isEmpty {
                 Text(role.onboardingPrompt).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(5).padding(10)
