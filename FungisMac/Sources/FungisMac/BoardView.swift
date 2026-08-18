@@ -58,6 +58,36 @@ struct BoardStrip: View {
     }
 }
 
+/// 이을 수 있는지 미리 본다. 누를 수는 있는데 아무 일도 안 일어나는 버튼이
+/// 제일 나쁘다. 서버가 거절할 것은 누르기 전에 이유를 적고 잠근다.
+///
+/// 막는 것은 서버다. 여기는 사람이 헛손질하지 않게 하는 것뿐이라, 둘이
+/// 어긋나면 서버가 옳다.
+enum BoardGraph {
+    static func refusal(
+        source: BoardNode, target: BoardNode, nodes: [BoardNode]
+    ) -> String? {
+        if source.id == target.id { return "자기 자신이다" }
+        if target.blockedBy.contains(source.id) { return "이미 이어져 있다" }
+        if reaches(from: source.id, to: target.id, nodes: nodes) { return "순환이 된다" }
+        return nil
+    }
+
+    /// source가 target을 이미 몇 단계 건너서라도 기다리고 있으면, 반대로 걸 때
+    /// 순환이 된다. blockedBy는 기다리는 쪽의 것이다.
+    static func reaches(from startID: String, to goalID: String, nodes: [BoardNode]) -> Bool {
+        let byID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
+        var stack = [startID]
+        var seen: Set<String> = []
+        while let current = stack.popLast() {
+            if current == goalID { return true }
+            guard seen.insert(current).inserted, let node = byID[current] else { continue }
+            stack.append(contentsOf: node.blockedBy)
+        }
+        return false
+    }
+}
+
 /// 트랙 하나를 한 낱말로 줄인다. 막힌 것이 있으면 그것부터 말한다 —
 /// 띠에서 알고 싶은 것은 "지금 무엇이 멈춰 있나"다.
 enum BoardSummary {
@@ -150,6 +180,29 @@ struct BoardSheet: View {
                 }
             }
             .padding(20)
+            // 선은 카드 뒤가 아니라 위에 얹는다. 카드가 겹쳐 있으면 선이 끊겨
+            // 보이고, 끊긴 선은 없는 선과 같다.
+            .overlayPreferenceValue(NodeBoundsKey.self) { anchors in
+                GeometryReader { proxy in
+                    ForEach(edges(), id: \.self) { edge in
+                        if let from = anchors[edge.from], let to = anchors[edge.to] {
+                            EdgeShape(from: proxy[from], to: proxy[to])
+                                .stroke(
+                                    Color.orange.opacity(0.75),
+                                    style: StrokeStyle(lineWidth: 1.6, lineCap: .round)
+                                )
+                        }
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// 선행에서 후행으로. blockedBy가 기다리는 쪽의 것이라 방향을 여기서 뒤집는다.
+    private func edges() -> [BoardEdgeIDs] {
+        model.board.tracks.flatMap(\.nodes).flatMap { node in
+            node.blockedBy.map { BoardEdgeIDs(from: $0, to: node.id) }
         }
     }
 
@@ -215,6 +268,13 @@ struct BoardSheet: View {
         payload.hasPrefix("move:") ? String(payload.dropFirst(5)) : nil
     }
 
+    private func linkRefusal(source: BoardNode, target: BoardNode) -> String? {
+        BoardGraph.refusal(
+            source: source, target: target,
+            nodes: model.board.tracks.flatMap(\.nodes)
+        )
+    }
+
     /// 왼쪽 점은 선행이 들어오는 표시고, 오른쪽 점이 잡는 자리다. 방향을
     /// 글자로 설명하지 않아도 좌우가 말한다.
     ///
@@ -268,6 +328,10 @@ struct BoardSheet: View {
                 // 잡은 것이 있으면 카드마다 받는 자리를 크게 연다. 9pt 점 하나로는
                 // 어디를 눌러야 하는지도, 눌리기는 한 것인지도 알 수 없다.
                 if let source = linking, source.id != node.id {
+                    let refusal = linkRefusal(source: source, target: node)
+                    if let refusal {
+                        Text(refusal).font(.caption2).foregroundStyle(.secondary)
+                    }
                     Button("여기가 뒤") {
                         Task {
                             _ = await model.linkBoardNodes(
@@ -279,6 +343,7 @@ struct BoardSheet: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .font(.caption2)
+                    .disabled(refusal != nil)
                 }
                 Spacer()
                 Button(role: .destructive) {
@@ -292,6 +357,8 @@ struct BoardSheet: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // 선을 그리려면 카드가 어디 있는지 알아야 한다. 자기 자리를 위로 올린다.
+        .anchorPreference(key: NodeBoundsKey.self, value: .bounds) { [node.id: $0] }
         .background(cardColor(node), in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
@@ -371,5 +438,43 @@ struct BoardSheet: View {
                 draftTitles[track.projectID] = ""
             }
         }
+    }
+}
+
+
+struct BoardEdgeIDs: Hashable {
+    let from: String
+    let to: String
+}
+
+private struct NodeBoundsKey: PreferenceKey {
+    static let defaultValue: [String: Anchor<CGRect>] = [:]
+
+    static func reduce(
+        value: inout [String: Anchor<CGRect>],
+        nextValue: () -> [String: Anchor<CGRect>]
+    ) {
+        value.merge(nextValue()) { _, next in next }
+    }
+}
+
+/// 선행 카드의 오른쪽에서 나와 후행 카드의 왼쪽으로 들어간다. 가로로 빠졌다가
+/// 들어오게 굽혀서, 트랙이 여럿이어도 어느 카드에서 나왔는지가 보이게 한다.
+private struct EdgeShape: Shape {
+    let from: CGRect
+    let to: CGRect
+
+    func path(in _: CGRect) -> Path {
+        let start = CGPoint(x: from.maxX + 3, y: from.midY)
+        let end = CGPoint(x: to.minX - 3, y: to.midY)
+        let reach = max(28, abs(end.x - start.x) * 0.45)
+        var path = Path()
+        path.move(to: start)
+        path.addCurve(
+            to: end,
+            control1: CGPoint(x: start.x + reach, y: start.y),
+            control2: CGPoint(x: end.x - reach, y: end.y)
+        )
+        return path
     }
 }
