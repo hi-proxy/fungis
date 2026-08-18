@@ -52,3 +52,28 @@ private func node(_ id: String, waitsFor: [String] = []) throws -> BoardNode {
     let only = try node("a")
     #expect(BoardGraph.refusal(source: only, target: only, nodes: [only]) == "자기 자신이다")
 }
+
+@Test func aTicketCannotStartWhileItsPredecessorIsUnfinished() throws {
+    let blocker = try node("a")
+    let waiting = try node("b", waitsFor: ["a"])
+    let all = [blocker, waiting]
+
+    #expect(BoardGraph.blocksStarting(waiting, to: "active", nodes: all)?.id == "a")
+    // 안 시작으로 되돌리는 것은 막지 않는다. 되돌릴 길이 없으면 손이 갇힌다.
+    #expect(BoardGraph.blocksStarting(waiting, to: "todo", nodes: all) == nil)
+    // 이미 해버린 일을 못 했다고 우기면 사람이 보드를 버린다.
+    #expect(BoardGraph.blocksStarting(waiting, to: "done", nodes: all) == nil)
+}
+
+@Test func aTicketStartsFreelyOnceEveryPredecessorIsDone() throws {
+    let payload: [String: Any] = [
+        "id": "a", "project_id": "p", "title": "a",
+        "status": "done", "state": "done", "blocked_by": [],
+    ]
+    let finished = try JSONDecoder().decode(
+        BoardNode.self, from: JSONSerialization.data(withJSONObject: payload)
+    )
+    let waiting = try node("b", waitsFor: ["a"])
+
+    #expect(BoardGraph.blocksStarting(waiting, to: "active", nodes: [finished, waiting]) == nil)
+}

@@ -73,6 +73,19 @@ enum BoardGraph {
         return nil
     }
 
+    /// 선행이 안 끝났으면 하는 중으로 못 옮긴다. 이 규칙이 없으면 보드는
+    /// 순서를 적어두기만 하고 아무것도 지키지 않는다.
+    ///
+    /// 끝으로 옮기는 것은 막지 않는다. 이미 해버린 일을 보드가 못 했다고
+    /// 우기면 사람이 보드를 버린다.
+    static func blocksStarting(
+        _ node: BoardNode, to status: String, nodes: [BoardNode]
+    ) -> BoardNode? {
+        guard status == "active" else { return nil }
+        let byID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
+        return node.blockedBy.compactMap { byID[$0] }.first { $0.status != "done" }
+    }
+
     /// source가 target을 이미 몇 단계 건너서라도 기다리고 있으면, 반대로 걸 때
     /// 순환이 된다. blockedBy는 기다리는 쪽의 것이다.
     static func reaches(from startID: String, to goalID: String, nodes: [BoardNode]) -> Bool {
@@ -117,187 +130,352 @@ enum BoardSummary {
 }
 
 /// 손대는 자리. 늘 떠 있는 것은 띠고, 고치는 것은 여기서 한다.
+/// 손대는 자리. 늘 떠 있는 것은 띠고, 고치는 것은 여기서 한다.
+///
+/// 행이 프로젝트고 열이 상태다. 선은 카드 뒤에 그린다 — 앞에 그으면 글자를
+/// 가리고, 가려진 선은 없는 선과 같다. 프로젝트를 넘는 선만 굵게 긋는다.
+/// HQ가 존재하는 이유가 거기라서, 그것만 눈에 먼저 들어와야 한다.
 struct BoardSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var draftTitles: [String: String] = [:]
     @State private var linking: BoardNode?
-    @State private var dropTargetID: String?
+    @State private var hoveredCardID: String?
+    @State private var showEdges = true
+    @State private var onlyLinked = false
+
+    private static let columns: [(status: String, title: String)] = [
+        ("todo", "안 시작"), ("active", "하는 중"), ("done", "끝"),
+    ]
+
+    private static let trackWidth: CGFloat = 150
+    private static let columnWidth: CGFloat = 260
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let source = linking { linkingBanner(source) }
-            // 서버가 거절해도 화면이 아무 말을 안 했다. 순환이면 409가 오는데
-            // 그것이 어디에도 안 뜨면 눌러도 안 되는 것과 구별이 안 된다.
             if let message = model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
-                    .padding(.horizontal, 16).padding(.bottom, 8)
+                    .padding(.horizontal, 20).padding(.bottom, 8)
             }
             Divider()
             tracks
+            Divider()
+            legend
         }
-        .frame(minWidth: 720, minHeight: 460)
+        .frame(minWidth: 900, minHeight: 520)
         .task { await model.refreshBoard() }
+        // 잡은 것을 놓는 길이 버튼 하나뿐이면 손이 갇힌다.
+        .onExitCommand { linking = nil }
     }
 
-    /// 무엇을 잡았는지, 다음에 무엇을 눌러야 하는지 글자로 말한다. 점 색깔만
-    /// 바뀌면 잡혔는지 아닌지를 사람이 알 수 없다.
+    // MARK: 머리와 발
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(model.board.hq?.name ?? "상황보드").font(.title2.bold())
+            Text(summaryLine)
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Toggle("선 보기", isOn: $showEdges)
+                .toggleStyle(.checkbox).font(.caption)
+            Toggle("선행 있는 것만", isOn: $onlyLinked)
+                .toggleStyle(.checkbox).font(.caption)
+            Button("닫기") { dismiss() }
+        }
+        .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 12)
+    }
+
+    private var summaryLine: String {
+        let nodes = allNodes
+        let edgeCount = nodes.reduce(0) { $0 + $1.blockedBy.count }
+        return "\(model.board.tracks.count) 프로젝트 · 티켓 \(nodes.count) · 선행 \(edgeCount)"
+    }
+
+    private var legend: some View {
+        HStack(spacing: 16) {
+            legendItem(color: .green, text: "선행 충족")
+            legendItem(color: .orange, text: "선행 대기")
+            legendItem(color: .accentColor, text: "프로젝트 넘음")
+            Spacer()
+            if linking != nil {
+                Text("esc 취소").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 8)
+    }
+
+    private func legendItem(color: Color, text: String) -> some View {
+        HStack(spacing: 5) {
+            Capsule().fill(color).frame(width: 14, height: 3)
+            Text(text).font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
     private func linkingBanner(_ source: BoardNode) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.right.circle.fill").foregroundStyle(.green)
-            Text("‘\(source.title)’를 잡았다. 이 뒤에 올 카드의 ‘여기가 뒤’를 누른다.")
+            Text("‘\(source.title)’를 잡았다. 이 뒤에 올 카드의 왼쪽 포트에 놓거나 ‘여기가 뒤’를 누른다.")
                 .font(.caption)
             Spacer()
             Button("취소") { linking = nil }
                 .buttonStyle(.plain).font(.caption)
                 .contentShape(Rectangle())
         }
-        .padding(.horizontal, 16).padding(.bottom, 10)
+        .padding(.horizontal, 20).padding(.bottom, 10)
     }
 
-    private var header: some View {
-        HStack {
-            Text(model.board.hq?.name ?? "상황보드").font(.title2.bold())
-            Spacer()
-            Button("닫기") { dismiss() }
-        }
-        .padding(16)
-    }
-
-    private static let columns: [(status: String, title: String)] = [
-        ("todo", "안 시작"), ("active", "하는 중"), ("done", "끝"),
-    ]
+    // MARK: 판
 
     private var tracks: some View {
         ScrollView([.horizontal, .vertical]) {
             VStack(alignment: .leading, spacing: 0) {
                 columnHeader
-                ForEach(model.board.tracks) { track in
+                ForEach(visibleTracks) { track in
                     Divider()
                     trackSection(track)
                 }
             }
             .padding(20)
-            // 선은 카드 뒤가 아니라 위에 얹는다. 카드가 겹쳐 있으면 선이 끊겨
-            // 보이고, 끊긴 선은 없는 선과 같다.
-            .overlayPreferenceValue(NodeBoundsKey.self) { anchors in
-                GeometryReader { proxy in
-                    ForEach(edges(), id: \.self) { edge in
-                        if let from = anchors[edge.from], let to = anchors[edge.to] {
-                            EdgeShape(from: proxy[from], to: proxy[to])
-                                .stroke(
-                                    Color.orange.opacity(0.75),
-                                    style: StrokeStyle(lineWidth: 1.6, lineCap: .round)
-                                )
-                        }
-                    }
-                }
-                .allowsHitTesting(false)
+            // 선은 카드 뒤에 깔린다. 앞에 그으면 제목을 가린다.
+            .backgroundPreferenceValue(NodeBoundsKey.self) { anchors in
+                if showEdges { edgeLayer(anchors) }
             }
         }
     }
 
-    /// 선행에서 후행으로. blockedBy가 기다리는 쪽의 것이라 방향을 여기서 뒤집는다.
-    private func edges() -> [BoardEdgeIDs] {
-        model.board.tracks.flatMap(\.nodes).flatMap { node in
-            node.blockedBy.map { BoardEdgeIDs(from: $0, to: node.id) }
+    private func edgeLayer(_ anchors: [String: Anchor<CGRect>]) -> some View {
+        GeometryReader { proxy in
+            ForEach(edges(), id: \.self) { edge in
+                if let from = anchors[edge.from], let to = anchors[edge.to] {
+                    EdgeShape(from: proxy[from], to: proxy[to])
+                        .stroke(
+                            edge.crossesProjects ? Color.accentColor
+                                : (edge.satisfied ? Color.green : Color.orange),
+                            style: StrokeStyle(
+                                lineWidth: edge.crossesProjects ? 2.4 : 1.4,
+                                lineCap: .round
+                            )
+                        )
+                        .opacity(edge.satisfied ? 0.55 : 0.85)
+                }
+            }
         }
+        .allowsHitTesting(false)
     }
 
     private var columnHeader: some View {
         HStack(alignment: .bottom, spacing: 12) {
-            Text("").frame(width: 150, alignment: .leading)
+            Text("프로젝트")
+                .font(.caption.bold()).foregroundStyle(.secondary)
+                .frame(width: Self.trackWidth, alignment: .leading)
             ForEach(Self.columns, id: \.status) { column in
-                Text(column.title)
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 220, alignment: .leading)
+                HStack(spacing: 6) {
+                    Text(column.title).font(.caption.bold())
+                    Text("\(count(of: column.status))")
+                        .font(.caption2)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(.quaternary.opacity(0.5), in: Capsule())
+                }
+                .foregroundStyle(.secondary)
+                .frame(width: Self.columnWidth, alignment: .leading)
             }
         }
-        .padding(.bottom, 8)
+        .padding(.bottom, 10)
     }
 
-    /// 트랙 하나가 가로 한 줄이고 상태가 열이다. 상태를 드롭다운으로 두면
-    /// 한 줄씩 눌러 봐야 어디까지 왔는지 알 수 있다. 한 눈에 보라고 만든
-    /// 물건이 그러면 안 된다.
     private func trackSection(_ track: BoardTrack) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(track.projectName).font(.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(track.projectName).font(.headline).lineLimit(2)
+                Text(trackSubtitle(track)).font(.caption2).foregroundStyle(.secondary)
                 Button("떼기") {
                     Task { _ = await model.disconnectTrack(projectID: track.projectID) }
                 }
-                .buttonStyle(.plain)
-                .font(.caption)
+                .buttonStyle(.plain).font(.caption2)
                 // hit-area: 글자만 눌리지 않게 도형을 준다.
                 .contentShape(Rectangle())
                 .foregroundStyle(.secondary)
+                .padding(.top, 2)
             }
-            .frame(width: 150, alignment: .leading)
+            .frame(width: Self.trackWidth, alignment: .leading)
 
             ForEach(Self.columns, id: \.status) { column in
                 columnCell(track, status: column.status)
             }
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
+    }
+
+    private func trackSubtitle(_ track: BoardTrack) -> String {
+        let active = track.nodes.filter { $0.status == "active" }.count
+        if active > 0 { return "\(active) 하는 중" }
+        return track.nodes.isEmpty ? "티켓 없음" : "\(track.nodes.count) 티켓"
     }
 
     private func columnCell(_ track: BoardTrack, status: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(track.nodes.filter { $0.status == status }) { node in
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(cards(in: track, status: status)) { node in
                 nodeCard(node)
             }
             if status == "todo" { addNodeField(track) }
         }
-        .frame(width: 220, alignment: .top)
+        .frame(width: Self.columnWidth, alignment: .top)
         .frame(maxHeight: .infinity, alignment: .top)
         .dropDestination(for: String.self) { items, _ in
-            // 잇기 드래그가 열에 떨어지면 무시한다. 같은 String이라 접두사로 가른다.
             guard let payload = items.first,
                   let nodeID = Self.moved(payload) else { return false }
-            Task { _ = await model.setBoardNodeStatus(nodeID: nodeID, status: status) }
+            move(nodeID: nodeID, to: status)
             return true
         }
     }
 
-    /// 끄는 동작이 둘이라 접두사로 가른다. 몸통을 끌면 상태가 옮겨가고
-    /// 오른쪽 점을 끌면 선행이 된다.
-    private static func moved(_ payload: String) -> String? {
-        payload.hasPrefix("move:") ? String(payload.dropFirst(5)) : nil
+    // MARK: 티켓
+
+    private func nodeCard(_ node: BoardNode) -> some View {
+        HStack(spacing: 0) {
+            port(node, leading: true)
+            nodeCardBody(node)
+            port(node, leading: false)
+        }
+        .onHover { hoveredCardID = $0 ? node.id : (hoveredCardID == node.id ? nil : hoveredCardID) }
     }
 
-    private func linkRefusal(source: BoardNode, target: BoardNode) -> String? {
-        BoardGraph.refusal(
-            source: source, target: target,
-            nodes: model.board.tracks.flatMap(\.nodes)
-        )
+    private func nodeCardBody(_ node: BoardNode) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(node.title).font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(node.blockedBy, id: \.self) { blockerID in
+                blockerChip(node, blockerID: blockerID)
+            }
+
+            if let source = linking, source.id != node.id {
+                let refusal = BoardGraph.refusal(source: source, target: node, nodes: allNodes)
+                HStack(spacing: 6) {
+                    Button("여기가 뒤") { link(source: source, target: node) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small).font(.caption2)
+                        .disabled(refusal != nil)
+                    if let refusal {
+                        Text(refusal).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button(role: .destructive) {
+                        Task { _ = await model.removeBoardNode(nodeID: node.id) }
+                    } label: {
+                        Image(systemName: "trash").font(.caption2)
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(hoveredCardID == node.id ? 1 : 0)
+                }
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .anchorPreference(key: NodeBoundsKey.self, value: .bounds) { [node.id: $0] }
+        .background(.background, in: RoundedRectangle(cornerRadius: 9))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(cardStroke(node), lineWidth: linking?.id == node.id ? 2 : 1)
+        }
+        .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
+        .draggable("move:\(node.id)")
+        // 카드가 열을 덮고 있어서 여기서 안 받으면 카드마다 죽은 구역이 된다.
+        .dropDestination(for: String.self) { items, _ in
+            guard let payload = items.first,
+                  let movedID = Self.moved(payload), movedID != node.id else { return false }
+            move(nodeID: movedID, to: node.status)
+            return true
+        }
     }
 
-    /// 왼쪽 점은 선행이 들어오는 표시고, 오른쪽 점이 잡는 자리다. 방향을
-    /// 글자로 설명하지 않아도 좌우가 말한다.
-    ///
-    /// 받는 것은 점이 아니라 카드 안의 "여기가 뒤" 버튼이다. 점을 받는
-    /// 자리로도 쓰니 무엇을 눌러야 하는지가 흐려졌다. 한 가지 일만 시킨다.
+    private func cardStroke(_ node: BoardNode) -> Color {
+        if linking?.id == node.id { return .green }
+        if node.state == "waiting" { return .orange.opacity(0.5) }
+        return .secondary.opacity(0.2)
+    }
+
+    /// 선행마다 한 칩이다. 프로젝트 이름으로 묶으면 둘을 기다릴 때 어느 것을
+    /// 끊는지 고를 수 없다. 충족과 대기를 색으로 가르고 방을 넘는 것은 적는다.
+    private func blockerChip(_ node: BoardNode, blockerID: String) -> some View {
+        let blocker = allNodes.first { $0.id == blockerID }
+        let satisfied = blocker?.status == "done"
+        let crosses = blocker.map { $0.projectID != node.projectID } ?? false
+        let tint: Color = satisfied ? .green : .orange
+        return HStack(spacing: 4) {
+            Image(systemName: satisfied ? "checkmark.circle.fill" : "clock")
+                .font(.system(size: 9))
+            Text(chipText(blocker: blocker, crosses: crosses, satisfied: satisfied))
+                .font(.caption2)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                Task { _ = await model.unlinkBoardNodes(nodeID: node.id, waitsFor: blockerID) }
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                    // hit-area: 8pt 글리프는 손으로 못 맞춘다.
+                    .frame(width: 15, height: 15)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("이 선을 끊는다")
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(tint.opacity(0.12), in: Capsule())
+        .overlay {
+            if crosses { Capsule().stroke(Color.accentColor.opacity(0.5), lineWidth: 1) }
+        }
+    }
+
+    private func chipText(blocker: BoardNode?, crosses: Bool, satisfied: Bool) -> String {
+        let name = blocker?.title ?? "다른 방의 일"
+        let room = crosses ? (projectName(of: blocker) + " ") : ""
+        return "\(room)\(name) \(satisfied ? "뒤 · 충족" : "대기")"
+    }
+
+    private func projectName(of node: BoardNode?) -> String {
+        guard let node else { return "" }
+        return model.board.tracks.first { $0.projectID == node.projectID }?.projectName ?? ""
+    }
+
+    // MARK: 포트
+    //
+    // 평소엔 흔적만 남기고, 카드에 올리면 커지고, 놓을 수 있을 때 가장 커진다.
+    // 늘 크면 티켓을 읽는 데 방해가 되고, 늘 작으면 못 맞춘다.
+
     @ViewBuilder
-    private func linkHandle(_ node: BoardNode, leading: Bool) -> some View {
+    private func port(_ node: BoardNode, leading: Bool) -> some View {
+        let armed = linking != nil && linking?.id != node.id
+        let hovered = hoveredCardID == node.id
+        let droppable = leading && armed
+            && BoardGraph.refusal(source: linking!, target: node, nodes: allNodes) == nil
+        let dot: CGFloat = droppable ? 13 : (hovered ? 9 : 5)
+
         if leading {
             Circle()
-                .fill(node.state == "waiting" ? Color.orange : Color.secondary.opacity(0.3))
-                .frame(width: 7, height: 7)
-                .frame(width: 14)
-                .help(node.state == "waiting" ? "선행이 있다" : "선행이 들어오는 자리")
+                .fill(droppable ? Color.green : Color.secondary.opacity(hovered ? 0.5 : 0.25))
+                .frame(width: dot, height: dot)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if let source = linking, droppable { link(source: source, target: node) }
+                }
+                .help(droppable ? "여기 놓으면 뒤에 붙는다" : "선행이 들어오는 자리")
         } else {
             let isSource = linking?.id == node.id
-            Button {
-                linking = isSource ? nil : node
-            } label: {
+            Button { linking = isSource ? nil : node } label: {
                 Circle()
-                    .fill(isSource ? Color.green : Color.accentColor)
-                    .frame(width: isSource ? 11 : 8, height: isSource ? 11 : 8)
-                    // hit-area: 점은 손으로 못 맞춘다. 도형을 크게 준다.
-                    .frame(width: 20, height: 22)
+                    .fill(isSource ? Color.green : Color.accentColor.opacity(hovered ? 1 : 0.45))
+                    .frame(width: isSource ? 13 : dot, height: isSource ? 13 : dot)
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -305,173 +483,106 @@ struct BoardSheet: View {
         }
     }
 
-    /// 점은 카드 위에 얹지 않고 옆에 둔다. 카드가 통째로 draggable이라
-    /// 얹으면 카드의 드래그가 점의 드래그를 먹는다. 그래서 잇기가 안 됐다.
-    private func nodeCard(_ node: BoardNode) -> some View {
-        HStack(spacing: 3) {
-            linkHandle(node, leading: true)
-            nodeCardBody(node)
-            linkHandle(node, leading: false)
-        }
-    }
-
-    private func nodeCardBody(_ node: BoardNode) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(node.title).font(.callout).fixedSize(horizontal: false, vertical: true)
-            // 끊는 자리는 기다리는 쪽에 둔다. 간선은 기다리는 쪽의 것이라
-            // 여기 말고는 놓을 자리가 없다. 붙이는 길만 있고 떼는 길이 없으면
-            // 한 번 잘못 이은 것을 되돌릴 수 없다.
-            ForEach(node.blockedBy, id: \.self) { blockerID in
-                blockerChip(node, blockerID: blockerID)
-            }
-            HStack(spacing: 8) {
-                // 잡은 것이 있으면 카드마다 받는 자리를 크게 연다. 9pt 점 하나로는
-                // 어디를 눌러야 하는지도, 눌리기는 한 것인지도 알 수 없다.
-                if let source = linking, source.id != node.id {
-                    let refusal = linkRefusal(source: source, target: node)
-                    if let refusal {
-                        Text(refusal).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    Button("여기가 뒤") {
-                        Task {
-                            _ = await model.linkBoardNodes(
-                                nodeID: node.id, waitsFor: source.id
-                            )
-                            linking = nil
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .font(.caption2)
-                    .disabled(refusal != nil)
-                }
-                Spacer()
-                Button(role: .destructive) {
-                    Task { _ = await model.removeBoardNode(nodeID: node.id) }
-                } label: {
-                    Image(systemName: "trash").font(.caption2)
-                }
-                .buttonStyle(.plain)
-                .contentShape(Rectangle())
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // 선을 그리려면 카드가 어디 있는지 알아야 한다. 자기 자리를 위로 올린다.
-        .anchorPreference(key: NodeBoundsKey.self, value: .bounds) { [node.id: $0] }
-        .background(cardColor(node), in: RoundedRectangle(cornerRadius: 10))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    dropTargetID == node.id ? Color.green
-                        : (linking?.id == node.id ? Color.accentColor : Color.secondary.opacity(0.15)),
-                    lineWidth: dropTargetID == node.id || linking?.id == node.id ? 2 : 1
-                )
-        }
-        .draggable("move:\(node.id)")
-        // 받는 자리. 여기 떨어진 카드가 선행이고 이 카드가 기다린다.
-        .dropDestination(for: String.self) { items, _ in
-            // 카드 위에 떨어뜨려도 그 열로 옮겨진다. 카드가 열을 덮고 있어서
-            // 여기서 안 받으면 카드마다 죽은 구역이 된다.
-            guard let payload = items.first else { return false }
-            if let movedID = Self.moved(payload), movedID != node.id {
-                Task {
-                    _ = await model.setBoardNodeStatus(nodeID: movedID, status: node.status)
-                }
-                return true
-            }
-            return false
-        } isTargeted: { targeted in
-            // 받을 수 있는 자리인지 손이 알아야 한다. 놓아 보고 나서야 아는 건
-            // 안 되는 것과 구별이 안 된다.
-            dropTargetID = targeted ? node.id : (dropTargetID == node.id ? nil : dropTargetID)
-        }
-        .contextMenu {
-            // 드래그가 안 되는 상황에도 길은 남긴다.
-            Button(linking?.id == node.id ? "잇기 취소" : "잇기 시작") {
-                linking = linking?.id == node.id ? nil : node
-            }
-        }
-    }
-
-    private func blockerChip(_ node: BoardNode, blockerID: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "clock").font(.caption2)
-            Text(blockerTitle(blockerID)).font(.caption2)
-                .fixedSize(horizontal: false, vertical: true)
-            Button {
-                Task {
-                    _ = await model.unlinkBoardNodes(nodeID: node.id, waitsFor: blockerID)
-                }
-            } label: {
-                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
-                    // hit-area: 8pt 글리프는 손으로 못 맞춘다.
-                    .frame(width: 16, height: 16)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("이 선을 끊는다")
-        }
-        .foregroundStyle(.orange)
-        .padding(.horizontal, 6).padding(.vertical, 2)
-        .background(.orange.opacity(0.12), in: Capsule())
-    }
-
-    private func blockerTitle(_ id: String) -> String {
-        model.board.tracks.flatMap(\.nodes).first { $0.id == id }?.title ?? "다른 방의 일"
-    }
-
-    private func cardColor(_ node: BoardNode) -> some ShapeStyle {
-        node.state == "waiting"
-            ? AnyShapeStyle(.orange.opacity(0.12))
-            : AnyShapeStyle(.quaternary.opacity(0.3))
-    }
-
     private func addNodeField(_ track: BoardTrack) -> some View {
         HStack(spacing: 6) {
+            Image(systemName: "plus").font(.caption2).foregroundStyle(.secondary)
             TextField(
-                "올릴 것",
+                "티켓",
                 text: Binding(
                     get: { draftTitles[track.projectID] ?? "" },
                     set: { draftTitles[track.projectID] = $0 }
                 )
             )
-            .textFieldStyle(.plain)
+            .textFieldStyle(.plain).font(.caption)
             .onSubmit { addNode(to: track) }
-            Button("올리기") { addNode(to: track) }
-                .buttonStyle(.plain).font(.caption2)
-                .contentShape(Rectangle())
-                .disabled(draft(track).isEmpty)
         }
-        .padding(8)
-        .background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                .foregroundStyle(.quaternary)
+        }
+        .padding(.leading, 22)
     }
 
-    // MARK: 소집
-    //
-    // 전체 목록을 보여주고 체크로 고른다. 안 붙은 것만 보여주면 지금 누가
-    // 들어와 있는지가 안 보이고, lead 여부도 눌러봐야 안다.
+    // MARK: 셈과 규칙
 
+    private var allNodes: [BoardNode] { model.board.tracks.flatMap(\.nodes) }
+
+    private var visibleTracks: [BoardTrack] {
+        guard onlyLinked else { return model.board.tracks }
+        let linked = Set(allNodes.flatMap { [$0.blockedBy, $0.blockedBy.isEmpty ? [] : [$0.id]].flatMap { $0 } })
+        return model.board.tracks.filter { track in
+            track.nodes.contains { linked.contains($0.id) }
+        }
+    }
+
+    private func cards(in track: BoardTrack, status: String) -> [BoardNode] {
+        let inColumn = track.nodes.filter { $0.status == status }
+        guard onlyLinked else { return inColumn }
+        let referenced = Set(allNodes.flatMap(\.blockedBy))
+        return inColumn.filter { !$0.blockedBy.isEmpty || referenced.contains($0.id) }
+    }
+
+    private func count(of status: String) -> Int {
+        allNodes.filter { $0.status == status }.count
+    }
+
+    private func edges() -> [BoardEdge] {
+        let byID = Dictionary(uniqueKeysWithValues: allNodes.map { ($0.id, $0) })
+        return allNodes.flatMap { node in
+            node.blockedBy.compactMap { blockerID -> BoardEdge? in
+                guard let blocker = byID[blockerID] else { return nil }
+                return BoardEdge(
+                    from: blockerID, to: node.id,
+                    crossesProjects: blocker.projectID != node.projectID,
+                    satisfied: blocker.status == "done"
+                )
+            }
+        }
+    }
+
+    private func move(nodeID: String, to status: String) {
+        guard let node = allNodes.first(where: { $0.id == nodeID }) else { return }
+        if let blocker = BoardGraph.blocksStarting(node, to: status, nodes: allNodes) {
+            model.errorMessage = "‘\(blocker.title)’가 아직 안 끝났다. 그것부터 끝낸다."
+            return
+        }
+        Task { _ = await model.setBoardNodeStatus(nodeID: nodeID, status: status) }
+    }
+
+    private func link(source: BoardNode, target: BoardNode) {
+        Task {
+            _ = await model.linkBoardNodes(nodeID: target.id, waitsFor: source.id)
+            linking = nil
+        }
+    }
+
+    private static func moved(_ payload: String) -> String? {
+        payload.hasPrefix("move:") ? String(payload.dropFirst(5)) : nil
+    }
 
     private func draft(_ track: BoardTrack) -> String {
-        (draftTitles[track.projectID] ?? "").trimmingCharacters(in: .whitespaces)
+        (draftTitles[track.projectID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func addNode(to track: BoardTrack) {
         let title = draft(track)
         guard !title.isEmpty else { return }
         Task {
-            if await model.addBoardNode(projectID: track.projectID, title: title) {
-                draftTitles[track.projectID] = ""
-            }
+            _ = await model.addBoardNode(projectID: track.projectID, title: title)
+            draftTitles[track.projectID] = ""
         }
     }
 }
 
-
-struct BoardEdgeIDs: Hashable {
+/// 그릴 선 하나. 프로젝트를 넘는지와 선행이 끝났는지를 같이 들고 다닌다 —
+/// 그리는 자리에서 다시 찾으면 카드마다 전체를 훑게 된다.
+struct BoardEdge: Hashable {
     let from: String
     let to: String
+    let crossesProjects: Bool
+    let satisfied: Bool
 }
 
 private struct NodeBoundsKey: PreferenceKey {
