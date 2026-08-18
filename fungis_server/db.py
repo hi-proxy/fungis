@@ -530,6 +530,14 @@ class FungisDB:
             ).fetchone()
         return dict(row) if row else None
 
+    def principal_kind(self, principal_id: str) -> str | None:
+        """없는 신원은 None. 판정하는 쪽이 없음과 에이전트를 구별해야 한다."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT kind FROM principals WHERE id = ?", (principal_id,)
+            ).fetchone()
+            return row["kind"] if row else None
+
     def workspace_participant(self, *, workspace_id: str, principal_id: str) -> bool:
         """이 사람이 그 방의 대화를 읽어도 되나.
 

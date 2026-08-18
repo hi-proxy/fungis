@@ -109,3 +109,28 @@ def test_reassigning_a_role_speaks_to_every_new_agent(tmp_path):
 
         arrived = assign("agent-a")
         assert arrived, "앞서 맡았던 에이전트로 되돌려도 init이 나가야 한다"
+
+
+def test_the_convene_list_is_not_shared_with_agents(tmp_path):
+    """보드는 방끼리 공유하지만 소집은 아니다.
+
+    이 응답에는 전 프로젝트의 이름과 역할과 붙은 에이전트가 들어 있다.
+    부를 사람을 고르는 자리라 부르는 쪽만 본다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        enroll(client, "pm", kind="human")
+        enroll(client, "agent-a")
+
+        assert client.get("/v1/board/candidates", params={"caller": "pm"}).status_code == 200
+        assert client.get(
+            "/v1/board/candidates", params={"caller": "agent-a"}
+        ).status_code == 403
+        assert client.get(
+            "/v1/board/candidates", params={"caller": "nobody"}
+        ).status_code == 403
+        # caller를 선택으로 두면 안 싣는 쪽이 곧 우회로가 된다.
+        assert client.get("/v1/board/candidates").status_code == 422
+
+        # 노드는 그대로 공유한다.
+        assert client.get("/v1/board").status_code == 200

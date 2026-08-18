@@ -461,7 +461,8 @@ class PMClient:
         return result
 
     def board_candidates(self) -> list[dict]:
-        result = self._request("GET", "/v1/board/candidates")
+        query = urllib.parse.urlencode({"caller": self.caller_id or ""})
+        result = self._request("GET", f"/v1/board/candidates?{query}")
         assert isinstance(result, list)
         return result
 

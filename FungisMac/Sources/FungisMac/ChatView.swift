@@ -60,7 +60,7 @@ struct ChatView: View {
                             LazyVStack(spacing: 8) {
                                 Color.clear.frame(height: 1).id("chat-bottom")
                                 if filteredTimeline.isEmpty, !model.isLoadingTimeline {
-                                    emptyRoomGuide
+                                    Group { isHQ ? AnyView(emptyHQGuide) : AnyView(emptyRoomGuide) }
                                         // 뒤집힌 스택 안이라 한쪽 패딩은 방향이
                                         // 함께 반전된다. 대칭으로 둬서 무관하게 만든다.
                                         .padding(.vertical, 60)
@@ -208,6 +208,30 @@ struct ChatView: View {
     /// 방을 새로 만들면 무엇부터 해야 하는지가 화면에 없다. 남은 단계만
     /// 보여주고 끝나면 사라진다. 온보딩은 방마다 한 번이라 상시 UI를 바꾸는
     /// 대신 빈 상태에만 둔다.
+    private var isHQ: Bool {
+        model.snapshot.projects.first { $0.id == model.selectedProjectID }?.isHQ == true
+    }
+
+    /// HQ에는 역할이 없다. 프로젝트용 3단계를 그대로 띄우면 영원히 준비가 안 된
+    /// 방으로 보인다. 여기서 할 일은 방을 부르는 것이지 역할을 만드는 것이 아니다.
+    private var emptyHQGuide: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 34)).foregroundStyle(.tertiary)
+            Text("여기서 여러 방을 함께 본다").font(.title3.bold())
+            Text("소집한 방의 lead만 이 타임라인을 읽는다. 각 방의 진행은 위 상황판에 쌓인다.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("소집 열기", systemImage: "person.2.badge.plus") {
+                inspectorTab = .roles
+                showInspector = true
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity)
+    }
+
     private var emptyRoomGuide: some View {
         VStack(spacing: 14) {
             Image(systemName: "bubble.left.and.bubble.right")

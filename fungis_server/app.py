@@ -420,7 +420,14 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/v1/board/candidates")
-    def board_candidates() -> list[dict]:
+    def board_candidates(caller: str = Query(...)) -> list[dict]:
+        # 보드와 소집은 접근 레벨이 다르다. 노드는 방끼리 공유하는 것이 맞지만
+        # 소집은 아니다. 이 응답에는 전 프로젝트의 이름과 역할과 담당 에이전트가
+        # 들어 있다. 부를 사람을 고르는 자리라 부르는 쪽만 본다.
+        if db.principal_kind(caller) != "human":
+            raise HTTPException(
+                status_code=403, detail="only the PM can read the convene list"
+            )
         return db.board_candidates()
 
     @app.get("/v1/board")
