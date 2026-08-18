@@ -6,6 +6,7 @@
 제품 명세: [PRODUCT_SPEC.md](PRODUCT_SPEC.md)
 보드 프로토콜: [BOARD_PROTOCOL.md](BOARD_PROTOCOL.md) — 에이전트가 보드를 읽고 쓰는 법
 에이전트 CLI: [CLI.md](CLI.md) — 동사 셋, 주소 넷, 자리별 기본 수신자
+고칠 목록: [BACKLOG.md](BACKLOG.md) — 리팩토링 비판 웨이브의 일감. 위치·완료 기준까지
 저장소 상태: 로컬 Git repository, branch `cross-project`. 구현 기준 SHA는 아래 착지 정보에 기록한다.
 
 ## 읽는 순서
