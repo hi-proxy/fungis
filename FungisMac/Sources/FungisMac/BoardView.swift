@@ -318,11 +318,11 @@ struct BoardSheet: View {
     private func nodeCardBody(_ node: BoardNode) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(node.title).font(.callout).fixedSize(horizontal: false, vertical: true)
-            if node.state == "waiting" {
-                let names = BoardSummary.blockerNames(of: node, in: model.board.tracks)
-                Label(names.joined(separator: ", "), systemImage: "clock")
-                    .font(.caption2).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+            // 끊는 자리는 기다리는 쪽에 둔다. 간선은 기다리는 쪽의 것이라
+            // 여기 말고는 놓을 자리가 없다. 붙이는 길만 있고 떼는 길이 없으면
+            // 한 번 잘못 이은 것을 되돌릴 수 없다.
+            ForEach(node.blockedBy, id: \.self) { blockerID in
+                blockerChip(node, blockerID: blockerID)
             }
             HStack(spacing: 8) {
                 // 잡은 것이 있으면 카드마다 받는 자리를 크게 연다. 9pt 점 하나로는
@@ -392,6 +392,33 @@ struct BoardSheet: View {
                 linking = linking?.id == node.id ? nil : node
             }
         }
+    }
+
+    private func blockerChip(_ node: BoardNode, blockerID: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "clock").font(.caption2)
+            Text(blockerTitle(blockerID)).font(.caption2)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                Task {
+                    _ = await model.unlinkBoardNodes(nodeID: node.id, waitsFor: blockerID)
+                }
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                    // hit-area: 8pt 글리프는 손으로 못 맞춘다.
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("이 선을 끊는다")
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(.orange.opacity(0.12), in: Capsule())
+    }
+
+    private func blockerTitle(_ id: String) -> String {
+        model.board.tracks.flatMap(\.nodes).first { $0.id == id }?.title ?? "다른 방의 일"
     }
 
     private func cardColor(_ node: BoardNode) -> some ShapeStyle {
