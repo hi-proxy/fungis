@@ -11,14 +11,14 @@
 ## 읽는 순서
 
 1. 이 문서의 "제품 경계"와 "하지 말 것"
-2. `git show d036ad2` — 직전 웨이브가 무엇을 왜 바꿨는지 커밋 본문에 있다
+2. `git log --oneline cfcf170~1..` — 직전 웨이브가 무엇을 왜 바꿨는지 커밋 본문에 있다
 3. 필요한 범위만 "주요 코드 위치"에서 찾는다
 
 ## Git 착지 정보
 
 - 원격 저장소: `git@github.com:hi-proxy/dispatch.git` (아직 push 하지 않음. 통짜 하나로 올린다)
 - 기준 branch: `cross-project`
-- 구현 기준 commit: `d036ad2` (`feat: rebuild the agent CLI around three verbs and one way to address`)
+- 구현 기준 commit: `dd261a4` (`docs: write down the CLI an agent actually meets`)
 - 런타임 DB, `.venv`, Swift 빌드 산출물, 로컬 권한 설정은 Git에서 제외
 
 ## 제품 경계
@@ -280,8 +280,60 @@ FungisMac/build-app.sh
 3. M3 Windows Node와 PowerShell/WSL terminal adapter
 4. M4 Windows PM desktop client
 
+### 정했으나 아직 안 만든 것
+
+문구와 동작까지 합의됐고 구현만 남았다. 다시 논의하지 말고 그대로 만든다.
+
+- **lead 지정·해제 안내.** lead 로 세워지거나 내려갈 때 그 에이전트에게 한 번 간다.
+  소집 모달에서 여럿을 세워도 **모달이 닫힐 때 한 번에** 보낸다 — 즉시 보내면 모달
+  안에서 lead 를 바꿨을 때 앞사람이 이미 안내를 받아 놓고 lead 가 아니게 된다.
+  둘 다 "회신 불요"를 붙인다. 안 붙이면 소집 한 번에 방마다 "알겠다"가 돌아온다.
+
+  ```
+  너는 ARCHIVIA bookclub 프로젝트의 lead 로 선택되었다.
+  HQ 는 lead 들이 소속된 상위 프로젝트이다.
+
+    fungis history 20 --project HQ            읽는다
+    fungis send --project HQ "..."             발행한다. lead 전원이 받는다
+    fungis send --project HQ --to <project> "..."   그 프로젝트 lead 에게만
+    fungis board                               상황보드를 읽는다
+    fungis board add "..."                     네 프로젝트 트랙에 올린다
+    fungis board start / done <ticket>
+    fungis board wait / unwait <ticket> <blocker>
+
+  HQ 글은 네 프로젝트 타임라인에 안 뜬다. 전할지는 네가 정한다.
+  회신 불요.
+  ```
+
+  해제 시에는 두 줄만 보낸다.
+
+  ```
+  너는 더 이상 ARCHIVIA bookclub 프로젝트의 lead 가 아니다.
+  HQ 접근이 닫혔다.
+  회신 불요.
+  ```
+
+  전문을 보내지 않는 이유: 세션은 기억을 이어가므로 매번 설명을 실으면 이미 아는
+  것을 계속 다시 산다. 명령만 주면 현황과 사용법은 알아서 부른다.
+
+- **소집 모달의 저장중 표시.** lead 를 세우는 동안 표시가 없다. `AppModel.isMutating`
+  이 이미 있으니 `ConveneSheet` 이 그것을 쓰면 된다. 취소는 만들지 않는다 — 누르는
+  즉시 반영되므로 닫는 것이 곧 확정이다.
+
+- **매니페스트의 권한스코프.** lead 안내에 "하위 에이전트의 권한스코프"를 실기로 했으나
+  지금 제품에 권한 개념이 역할 배정밖에 없어 실을 것이 없다. 권한 모델이 생길 때 함께
+  정한다. 그때까지 보류.
+
+### 실사용에서 살펴야 할 것
+
+- **소속 없는 직결 세션은 이제 글도 못 쓴다.** 읽기는 원래 403이었으므로 계약이
+  일관돼진 것이지만, 역할 없이 붙여 쓰던 세션이 있었다면 그 자리가 막힌다.
+- **앱을 껐다 켜기 전까지는 새 서버 기능이 없다.** 티켓 프리픽스 migration 도 그때
+  돌고, `fungis state` 는 그 전까지 404 다(`/v1/workspaces/{id}/members` 를 모른다).
+
+### 열려 있는 것
+
 실사용 중 발견한 UI 마찰은 불변조건을 깨지 않는 작은 변경으로 병행할 수 있다.
-현재 열려 있는 것은 다음 셋이다.
 
 - 사이드바 안읽음 배지와 마지막 메시지 미리보기. control API가 프로젝트별
   요약(`last_message_preview`·`last_at`·`unread_count`)을 주지 않아 미구현이다.
@@ -291,8 +343,10 @@ FungisMac/build-app.sh
 - 터미널 어댑터 분리. cmux 의존이 `fungis_node/cmux.py`에 모여 있으나 인터페이스로
   갈라져 있지는 않다. 경계를 그으면 일반 터미널 지원과 M3 Windows 어댑터 자리가
   같이 생기고, 파싱 규칙이 어댑터별 책임이 된다.
-- HQ 상황보드 실증. 코드와 테스트는 착지했으나 연결된 트랙이 0이라 실제 화면을
-  본 적이 없다. 앱에서 HQ 소집을 한 번 돌려 노드·간선·순환 차단을 확인해야 한다.
+- HQ 실증. 서버·CLI·앱이 다 붙었지만 사람이 실제로 돌려본 적이 없다. 소집을 한 번
+  하고 나면 다음이 한꺼번에 확인된다 — 보드의 노드·간선·순환 차단, lead 안내가
+  가는 것, lead 가 HQ 를 읽는 것, `send --project HQ` 가 전원에게 가는 것,
+  `--to <방>` 이 그 방 lead 하나로 좁혀지는 것.
 - 빈 방 표시(`No messages`)는 프로젝트 삭제가 보류 범위라 실증하지 못했다.
   방향 의존을 코드에서 없애 두었으므로 새 프로젝트를 만들 일이 생기면 함께
   확인한다.
