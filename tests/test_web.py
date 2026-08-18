@@ -1,8 +1,10 @@
+import os
+
 from fastapi.testclient import TestClient
 
 from fungis_node.cmux import CmuxAgentCandidate
 from fungis_node.registry import LocalRegistry
-from fungis_node.web import create_web_app, pm_relation
+from fungis_node.web import create_web_app, pm_relation, source_fingerprint
 from fungis_server.app import create_app
 
 
@@ -62,7 +64,11 @@ def test_web_index_is_served(tmp_path):
 def test_control_health_does_not_require_server_or_cmux(tmp_path):
     app = create_web_app(tmp_path / "node.db", cmux=FakeCmux())
     with TestClient(app) as client:
-        assert client.get("/health").json() == {"status": "ok", "sends_wakes": True}
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "sends_wakes": True,
+            "stale": False,
+        }
 
 
 def test_health_admits_when_it_is_not_sending_wakes(tmp_path):
@@ -74,7 +80,86 @@ def test_health_admits_when_it_is_not_sending_wakes(tmp_path):
     """
     app = create_web_app(tmp_path / "node.db", cmux=FakeCmux(), sends_wakes=False)
     with TestClient(app) as client:
-        assert client.get("/health").json() == {"status": "ok", "sends_wakes": False}
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "sends_wakes": False,
+            "stale": False,
+        }
+
+
+def _write_py(root, name, body, mtime=None):
+    path = root / name
+    path.write_text(body)
+    if mtime is not None:
+        os.utime(path, ns=(mtime, mtime))
+    return path
+
+
+def test_source_fingerprint_sees_edits_and_ignores_everything_else(tmp_path):
+    """지문이 소스 변경을 감지한다. mtime 해상도에 기대지 않도록 utime으로 박는다."""
+    _write_py(tmp_path, "a.py", "x = 1\n", mtime=1_000)
+    baseline = source_fingerprint([tmp_path])
+    assert baseline is not None
+    assert source_fingerprint([tmp_path]) == baseline
+    # .py가 아닌 파일은 daemon이 실행하는 코드가 아니다.
+    (tmp_path / "notes.txt").write_text("changed")
+    assert source_fingerprint([tmp_path]) == baseline
+    # 내용은 같아도 mtime이 다르면 다른 지문이다 — 같은 크기로 되돌린 편집도 잡는다.
+    _write_py(tmp_path, "a.py", "x = 1\n", mtime=2_000)
+    assert source_fingerprint([tmp_path]) != baseline
+    # 파일이 늘어도 잡는다.
+    _write_py(tmp_path, "b.py", "y = 2\n", mtime=1_000)
+    assert source_fingerprint([tmp_path]) != baseline
+
+
+def test_source_fingerprint_is_none_when_no_root_exists(tmp_path):
+    assert source_fingerprint([tmp_path / "missing"]) is None
+
+
+def test_health_reports_stale_when_sources_change_after_startup(tmp_path):
+    """파이썬을 고치고 앱만 다시 열면 화면은 새것인데 서버는 옛 코드로 답했다.
+
+    daemon이 기동 시점 지문을 기억하고 health마다 디스크와 대조해 자기가
+    낡았음을 말해야 앱이 갈아치울 수 있다.
+    """
+    sources = tmp_path / "src"
+    sources.mkdir()
+    _write_py(sources, "mod.py", "x = 1\n", mtime=1_000)
+    app = create_web_app(
+        tmp_path / "node.db", cmux=FakeCmux(), source_roots=[sources]
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").json()["stale"] is False
+        _write_py(sources, "mod.py", "x = 2\n", mtime=2_000)
+        assert client.get("/health").json()["stale"] is True
+
+
+def test_health_is_not_stale_when_sources_are_unmeasurable(tmp_path):
+    """소스를 못 찾으면(패키징된 배포 등) stale이라고 하지 않는다.
+
+    못 재는 것을 낡았다고 하면 재시작해도 똑같아서 무한 재시작이 된다.
+    """
+    app = create_web_app(
+        tmp_path / "node.db",
+        cmux=FakeCmux(),
+        source_roots=[tmp_path / "missing"],
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").json()["stale"] is False
+
+
+def test_shutdown_replies_before_running_the_shutdown_hook(tmp_path):
+    """앱이 낡은 daemon을 내릴 때 부른다. 응답을 먼저 돌려주고 나서 죽어야
+    앱이 성공을 알고 다음 단계(새로 띄우기)로 갈 수 있다."""
+    calls = []
+    app = create_web_app(
+        tmp_path / "node.db", cmux=FakeCmux(), shutdown=lambda: calls.append(True)
+    )
+    with TestClient(app) as client:
+        response = client.post("/shutdown")
+    assert response.status_code == 200
+    assert response.json() == {"status": "shutting-down"}
+    assert calls == [True]
 
 
 def test_web_agent_toggle_and_focus_use_local_cmux(tmp_path):
