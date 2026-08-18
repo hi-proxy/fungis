@@ -16,6 +16,36 @@ from .server_url import validate_server_url
 DEFAULT_CONFIG = Path.home() / ".config" / "fungis" / "agent.json"
 
 
+BOARD_PROTOCOL = """How to read the board
+
+  rooms                       prefix, room name, and room id, once each
+  you       FUNG @role        which room is yours
+  summary   5 tickets, ...    the whole board in one line
+  ARCH-12  waiting  "title"  blockedBy MEI-31  blocks FUNG-11
+
+Three rules are enough.
+  Split on spaces outside quotes; read anything inside quotes whole.
+  A newline ends a ticket.
+  A ticket name such as ARCH-12 already says which room and which number.
+
+blockedBy is what this ticket waits for. blocks is what waits for this ticket:
+finish it and those are freed, so tell them.
+
+Naming a ticket
+  ARCH-12   any room
+  12        your own room
+
+Commands
+  fungis board                     read
+  fungis board add "..."           put one on your track
+  fungis board start ARCH-12
+  fungis board done ARCH-12
+  fungis board wait ARCH-12 MEI-31    ARCH-12 waits for MEI-31
+  fungis board unwait ARCH-12 MEI-31
+Every command echoes the ticket line it produced, so you do not read the board again.
+"""
+
+
 def load_config(path: Path | None = None) -> dict:
     path = path or Path(os.environ.get("FUNGIS_AGENT_CONFIG", DEFAULT_CONFIG))
     try:
@@ -90,17 +120,29 @@ Use role names as stable addresses; session names may change.""",
     )
     # 노드는 그 방이 올린다. PM이 대신 쳐 넣으면 PM이 이미 아는 것을 옮겨 적는
     # 일이 되고, 보드는 아무것도 알려주지 않는 화면이 된다.
+    board.epilog = BOARD_PROTOCOL
+    board.formatter_class = argparse.RawDescriptionHelpFormatter
     board_actions = board.add_subparsers(dest="board_command")
     board_add = board_actions.add_parser("add", help="put one item on your track")
     board_add.add_argument("title", nargs="+")
-    board_start = board_actions.add_parser("start", help="mark an item as in progress")
-    board_start.add_argument("node_id")
-    board_done = board_actions.add_parser("done", help="mark an item as finished")
-    board_done.add_argument("node_id")
+    board_start = board_actions.add_parser("start", help="mark a ticket as in progress")
+    board_start.add_argument("ticket", help="ticket name such as ARCH-12")
+    board_done = board_actions.add_parser("done", help="mark a ticket as finished")
+    board_done.add_argument("ticket", help="ticket name such as ARCH-12")
+    board_wait = board_actions.add_parser(
+        "wait", help="make a ticket wait for another one"
+    )
+    board_wait.add_argument("ticket", help="the one that waits")
+    board_wait.add_argument("blocker", help="the one it waits for")
+    board_unwait = board_actions.add_parser("unwait", help="cut that dependency")
+    board_unwait.add_argument("ticket")
+    board_unwait.add_argument("blocker")
     ask = commands.add_parser(
         "ask", help="ask another project's lead a question on the board"
     )
-    ask.add_argument("project", help="the project whose lead should answer")
+    ask.add_argument(
+        "project", help="room to ask: its ticket prefix (ARCH), name, or id"
+    )
     ask.add_argument("body", nargs="+")
     history = commands.add_parser("history", help="read shared project history")
     history.add_argument("count", nargs="?", type=int, default=20)
@@ -390,41 +432,143 @@ def emit_inbox(messages: list[dict]) -> None:
         )
 
 
-def compact_board(board: list[dict]) -> dict:
-    """보드를 에이전트가 읽을 모양으로 줄인다.
+def render_board(board: list[dict], you: str | None = None, role: str | None = None) -> str:
+    """보드를 줄 프로토콜로 그린다.
 
-    막힌 노드에는 무엇을 기다리는지와 **그 방에 물어보는 명령**을 같이 싣는다.
-    "archivia를 기다림"까지만 주면 에이전트가 누구에게 어떻게 물을지 한 번 더
-    생각해야 한다. 명령이 같이 오면 생각할 것이 없다.
+    JSON을 주면 한 줄에 uuid가 아홉 번 나오고, 그중 셋이 같은 제목을 가리킨다.
+    에이전트는 그걸 눈으로 맞춰야 하고 그래서 보드를 두 번 읽는다.
+
+    읽는 규칙은 셋이다.
+      따옴표 밖은 공백으로 자르고 따옴표 안은 통으로 읽는다
+      줄바꿈이 티켓 경계다
+      티켓 이름 ARCH-12 하나가 어느 방 몇 번인지 다 말한다
+
+    프리픽스가 방을 들고 다니므로 본문에 방 이름을 다시 적지 않는다. 방 본이름과
+    uuid가 필요하면 rooms 블록에서 찾는다 — 본문에 뿌리지 않는 이유는 그것이
+    사람도 에이전트도 안 읽는 문자열이기 때문이다.
     """
-    titles = {
-        node["id"]: (track["project_id"], node["title"], node["status"])
+    names = {}
+    lines = ["rooms"]
+    for track in board:
+        prefix = track.get("ticket_prefix") or "?"
+        names[track["project_id"]] = prefix
+        lines.append(f'  {prefix}  "{track["project_name"]}"  {track["project_id"]}')
+
+    ticket = {
+        node["id"]: f'{names[track["project_id"]]}-{node.get("number", "?")}'
         for track in board
         for node in track["nodes"]
     }
-    tracks = []
+
+    total = sum(len(track["nodes"]) for track in board)
+    waiting = sum(
+        1 for track in board for node in track["nodes"] if node["state"] == "waiting"
+    )
+    crossing = sum(
+        1
+        for track in board
+        for node in track["nodes"]
+        for other in node.get("blocked_by", [])
+        if ticket.get(other, "").split("-")[0] != names[track["project_id"]]
+    )
+    lines.append("")
+    if you:
+        lines.append(f'you       {names.get(you, "?")} {role or ""}'.rstrip())
+    lines.append(f"summary   {total} tickets, {waiting} waiting, {crossing} crossRoom")
+    lines.append("")
+
     for track in board:
-        nodes = []
-        for node in track["nodes"]:
-            item = {
-                "id": node["id"],
-                "title": node["title"],
-                "state": node["state"],
-            }
-            blocked = []
-            for blocker_id in node.get("blocked_by", []):
-                project_id, title, status = titles.get(
-                    blocker_id, (None, blocker_id, "unknown")
-                )
-                entry = {"project": project_id, "title": title, "status": status}
-                if project_id and project_id != track["project_id"]:
-                    entry["ask"] = f'fungis ask {project_id} "..."'
-                blocked.append(entry)
+        # 번호 순으로 낸다. 만든 시각 순으로 내면 같은 밀리초에 만든 둘이
+        # 뒤집혀서 FUNG-2가 FUNG-1보다 먼저 나온다.
+        for node in sorted(track["nodes"], key=lambda item: item.get("number") or 0):
+            row = [ticket[node["id"]], node["state"], f'"{_quote(node["title"])}"']
+            blocked = [ticket[i] for i in node.get("blocked_by", []) if i in ticket]
             if blocked:
-                item["waiting_for"] = blocked
-            nodes.append(item)
-        tracks.append({"project": track["project_id"], "nodes": nodes})
-    return {"board": tracks}
+                row.append("blockedBy " + " ".join(blocked))
+            holding = [ticket[i] for i in node.get("blocks", []) if i in ticket]
+            if holding:
+                row.append("blocks " + " ".join(holding))
+            lines.append("  ".join(row))
+    return "\n".join(lines)
+
+
+def ticket_names(board: list[dict]) -> dict[str, str]:
+    """노드 id -> ARCH-12. 한 군데서만 만든다."""
+    return {
+        node["id"]: f'{track.get("ticket_prefix") or "?"}-{node.get("number", "?")}'
+        for track in board
+        for node in track["nodes"]
+    }
+
+
+def resolve_ticket(board: list[dict], given: str, own_project: str | None) -> str:
+    """ARCH-12도 12도 받는다. 애매하면 거절하고 후보를 보여준다.
+
+    맨 숫자는 자기 방으로 읽는다. 남의 방 티켓을 맨 숫자로 부르면 어느 방인지
+    알 수 없으므로 거절한다 — 조용히 아무거나 고르면 엉뚱한 방의 일이 바뀐다.
+    """
+    names = ticket_names(board)
+    wanted = given.strip().upper()
+    exact = [node_id for node_id, name in names.items() if name.upper() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    if wanted.isdigit() and own_project:
+        here = [
+            node["id"]
+            for track in board
+            if track["project_id"] == own_project
+            for node in track["nodes"]
+            if str(node.get("number")) == wanted
+        ]
+        if len(here) == 1:
+            return here[0]
+    candidates = sorted(names.values())
+    raise RuntimeError(
+        f"no ticket named {given}. known tickets: {', '.join(candidates) or 'none'}"
+    )
+
+
+def resolve_room(board: list[dict], given: str) -> str:
+    """ARCH 도 방 이름도 uuid도 받는다.
+
+    막힌 티켓에서 프리픽스를 그대로 읽어 물어볼 수 있어야 한다. 한 번 더
+    대조하게 만들면 그 대조에서 착오가 난다.
+    """
+    wanted = given.strip()
+    for track in board:
+        if wanted == track["project_id"]:
+            return track["project_id"]
+    for track in board:
+        if wanted.upper() == (track.get("ticket_prefix") or "").upper():
+            return track["project_id"]
+    for track in board:
+        if wanted.casefold() == track["project_name"].casefold():
+            return track["project_id"]
+    known = ", ".join(
+        f'{track.get("ticket_prefix") or "?"} ({track["project_name"]})'
+        for track in board
+    )
+    raise RuntimeError(f"no room named {given}. known rooms: {known or 'none'}")
+
+
+def ticket_line(board: list[dict], node_id: str) -> str:
+    """바뀐 티켓 한 줄만 돌려준다. 보드를 다시 읽게 하지 않는다."""
+    body = render_board(board)
+    name = ticket_names(board).get(node_id)
+    for line in body.split("\n"):
+        if name and line.startswith(name + " "):
+            return line
+    return name or node_id
+
+
+def own_role_name(binding: dict) -> str | None:
+    role = binding.get("role_name")
+    return f"@{role}" if role else None
+
+
+def _quote(text: str) -> str:
+    """줄바꿈은 티켓 경계라 제목 안에 있으면 안 된다. 따옴표는 escape 한다."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
 
 
 def compact_history(project_id: str, messages: list[dict]) -> dict:
@@ -546,27 +690,28 @@ def main() -> None:
                 config["server"], registry,
                 caller_id=binding["principal_id"],
             )
+            board = client.board()
+            mine = active_project(registry, binding["principal_id"])
             if args.board_command == "add":
                 node = client.create_board_node(
-                    project_id=active_project(registry, binding["principal_id"]),
-                    title=" ".join(args.title),
+                    project_id=mine, title=" ".join(args.title),
                 )
-                print(json.dumps(
-                    {"added": node["id"], "title": node["title"]},
-                    ensure_ascii=False, separators=(",", ":"),
-                ))
+                print(ticket_line(client.board(), node["id"]))
             elif args.board_command in ("start", "done"):
                 status = "active" if args.board_command == "start" else "done"
-                node = client.update_board_node(args.node_id, status=status)
-                print(json.dumps(
-                    {"node": node["id"], "state": status},
-                    ensure_ascii=False, separators=(",", ":"),
-                ))
+                node_id = resolve_ticket(board, args.ticket, mine)
+                client.update_board_node(node_id, status=status)
+                print(ticket_line(client.board(), node_id))
+            elif args.board_command in ("wait", "unwait"):
+                node_id = resolve_ticket(board, args.ticket, mine)
+                blocker_id = resolve_ticket(board, args.blocker, mine)
+                if args.board_command == "wait":
+                    client.link_board_nodes(node_id=node_id, waits_for=blocker_id)
+                else:
+                    client.unlink_board_nodes(node_id=node_id, waits_for=blocker_id)
+                print(ticket_line(client.board(), node_id))
             else:
-                print(json.dumps(
-                    compact_board(client.board()),
-                    ensure_ascii=False, separators=(",", ":"),
-                ))
+                print(render_board(board, you=mine, role=own_role_name(binding)))
         elif args.command == "ask":
             client = PMClient(
                 config["server"], registry,
@@ -575,7 +720,8 @@ def main() -> None:
             hq = client.hq()
             if hq is None:
                 raise RuntimeError("no board to ask on yet")
-            lead = client.lead_of(args.project)
+            room = resolve_room(client.board(), args.project)
+            lead = client.lead_of(room)
             if lead is None or not lead.get("agent_id"):
                 # lead 자리가 비면 PM이 받는다. HQ에 남으니 PM이 거기서 본다.
                 raise RuntimeError(

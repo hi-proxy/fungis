@@ -345,6 +345,13 @@ struct BoardSheet: View {
 
     private func nodeCardBody(_ node: BoardNode) -> some View {
         VStack(alignment: .leading, spacing: 7) {
+            // 티켓 이름이 방과 번호를 같이 들고 다닌다. 사람이 대화에서 부를
+            // 이름도 이것이고, 에이전트가 명령에 쓸 이름도 이것이다.
+            if let name = ticketName(node) {
+                Text(name)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
             Text(node.title).font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -397,6 +404,16 @@ struct BoardSheet: View {
         }
     }
 
+    /// ARCH-12. 서버가 낡아 번호나 프리픽스가 없으면 이름을 안 보여준다 —
+    /// 반쪽짜리 이름을 보여주면 사람이 그것을 외운다.
+    private func ticketName(_ node: BoardNode) -> String? {
+        guard let number = node.number,
+              let prefix = model.board.tracks
+                  .first(where: { $0.projectID == node.projectID })?.ticketPrefix
+        else { return nil }
+        return "\(prefix)-\(number)"
+    }
+
     private func cardStroke(_ node: BoardNode) -> Color {
         if linking?.id == node.id { return .green }
         if node.state == "waiting" { return .orange.opacity(0.5) }
@@ -436,9 +453,9 @@ struct BoardSheet: View {
     }
 
     private func chipText(blocker: BoardNode?, crosses: Bool, satisfied: Bool) -> String {
-        let name = blocker?.title ?? "다른 방의 일"
-        let room = crosses ? (projectName(of: blocker) + " ") : ""
-        return "\(room)\(name) \(satisfied ? "뒤 · 충족" : "대기")"
+        // 이름이 있으면 이름으로 부른다. 제목은 두 방에서 겹칠 수 있다.
+        let name = blocker.flatMap(ticketName) ?? blocker?.title ?? "다른 방의 일"
+        return "\(name) \(satisfied ? "뒤 · 충족" : "대기")"
     }
 
     private func projectName(of node: BoardNode?) -> String {

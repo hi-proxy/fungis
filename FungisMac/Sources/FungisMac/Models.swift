@@ -465,6 +465,10 @@ struct BoardNode: Decodable, Identifiable, Hashable {
     let id: String
     let projectID: String
     let title: String
+    /// 방 안에서 1부터. 서버가 낡으면 안 온다.
+    let number: Int?
+    /// 이 티켓을 기다리는 것들. 없으면 끝내고 알릴 상대가 없다는 뜻이다.
+    let blocks: [String]?
     /// 저장된 값. todo / active / done
     let status: String
     /// 선행에서 읽은 값. waiting이 여기 더 있다
@@ -472,7 +476,7 @@ struct BoardNode: Decodable, Identifiable, Hashable {
     let blockedBy: [String]
 
     enum CodingKeys: String, CodingKey {
-        case id, title, status, state
+        case id, title, status, state, number, blocks
         case projectID = "project_id"
         case blockedBy = "blocked_by"
     }
@@ -482,11 +486,14 @@ struct BoardTrack: Decodable, Identifiable, Hashable {
     var id: String { projectID }
     let projectID: String
     let projectName: String
+    /// 티켓 이름의 앞부분. 서버가 낡으면 안 온다.
+    let ticketPrefix: String?
     let nodes: [BoardNode]
 
     enum CodingKeys: String, CodingKey {
         case projectID = "project_id"
         case projectName = "project_name"
+        case ticketPrefix = "ticket_prefix"
         case nodes
     }
 }

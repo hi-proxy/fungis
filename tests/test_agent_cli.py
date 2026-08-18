@@ -3,9 +3,9 @@ import json
 import pytest
 
 from fungis_node.agent_cli import (
-    active_project, compact_board, compact_history, emit_inbox, format_bootstrap,
+    active_project, compact_history, emit_inbox, format_bootstrap,
     load_config,
-    parser, stored_echo,
+    parser, render_board, resolve_room, stored_echo,
     write_error_message,
 )
 from fungis_node.install import install_agent_cli
@@ -296,44 +296,43 @@ def test_inbox_is_quiet_when_one_room(capsys):
     assert "--project" not in capsys.readouterr().err
 
 
-def test_compact_board_carries_the_command_to_ask_the_blocking_project():
-    """막힌 노드는 무엇을 기다리는지와 물어보는 법을 같이 들고 온다.
+def test_a_blocked_ticket_shows_which_room_to_ask_by_its_prefix():
+    """막힌 쪽은 무엇을 기다리는지와 누구에게 물을지를 같이 받아야 한다.
 
-    "archivia를 기다림"까지만 주면 에이전트가 누구에게 어떻게 물을지 한 번
-    더 생각해야 한다. 명령이 실려 오면 생각할 것이 없다.
+    예전에는 줄마다 `fungis ask <uuid>` 명령을 실어 보냈다. 이제는 티켓 이름이
+    방을 들고 다니므로 ARCH-1을 읽으면 물어볼 방이 ARCH라는 것이 바로 나온다.
+    ask가 그 프리픽스를 그대로 받는다 — 한 번 더 대조하게 만들면 거기서 착오가 난다.
     """
     board = [
         {
-            "project_id": "archivia", "project_name": "archivia",
+            "project_id": "p-archivia", "project_name": "archivia",
+            "ticket_prefix": "ARCH",
             "nodes": [{
-                "id": "n1", "title": "선행작업", "status": "active",
-                "state": "active", "waits_for": [], "blocked_by": [],
+                "id": "n1", "number": 1, "title": "선행작업", "status": "active",
+                "state": "active", "blocked_by": [], "blocks": ["n2"],
             }],
         },
         {
-            "project_id": "fungis", "project_name": "fungis",
-            "nodes": [
-                {
-                    "id": "n2", "title": "2단계", "status": "todo",
-                    "state": "waiting", "waits_for": ["n1"], "blocked_by": ["n1"],
-                },
-                {
-                    "id": "n3", "title": "1단계 후속", "status": "active",
-                    "state": "active", "waits_for": [], "blocked_by": [],
-                },
-            ],
+            "project_id": "p-fungis", "project_name": "fungis",
+            "ticket_prefix": "FUNG",
+            "nodes": [{
+                "id": "n2", "number": 2, "title": "2단계", "status": "todo",
+                "state": "waiting", "blocked_by": ["n1"], "blocks": [],
+            }],
         },
     ]
-    compact = compact_board(board)["board"]
-    fungis = next(track for track in compact if track["project"] == "fungis")
-    blocked = next(node for node in fungis["nodes"] if node["id"] == "n2")
-    assert blocked["state"] == "waiting"
-    assert blocked["waiting_for"] == [
-        {
-            "project": "archivia", "title": "선행작업", "status": "active",
-            "ask": 'fungis ask archivia "..."',
-        }
-    ]
-    # 안 막힌 노드에는 붙이지 않는다. 없는 자리에 명령이 있으면 부른다.
-    running = next(node for node in fungis["nodes"] if node["id"] == "n3")
-    assert "waiting_for" not in running
+    line = next(
+        row for row in render_board(board).split("\n") if row.startswith("FUNG-2 ")
+    )
+    assert "blockedBy ARCH-1" in line
+
+    assert resolve_room(board, "ARCH") == "p-archivia"
+    assert resolve_room(board, "arch") == "p-archivia"
+    assert resolve_room(board, "archivia") == "p-archivia"
+    assert resolve_room(board, "p-archivia") == "p-archivia"
+    try:
+        resolve_room(board, "nowhere")
+    except RuntimeError as error:
+        assert "ARCH" in str(error) and "FUNG" in str(error)
+    else:
+        raise AssertionError("없는 방은 거절해야 한다")

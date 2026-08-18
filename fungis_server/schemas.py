@@ -1,6 +1,12 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
+
+
+
+def one_line(value: str) -> str:
+    """줄바꿈을 공백으로 접는다. 보드 티켓 제목은 한 줄짜리 이름표다."""
+    return " ".join(value.split())
 
 
 class PrincipalCreate(BaseModel):
@@ -130,13 +136,17 @@ class RoleLead(BaseModel):
 
 class BoardNodeCreate(BaseModel):
     project_id: str = Field(min_length=1)
-    title: str = Field(min_length=1, max_length=200)
+    # 줄바꿈이 티켓 경계다. 제목이 그것을 깨면 프로토콜이 무너진다. escape를
+    # 늘리는 대신 여기서 접는다 — 티켓 제목은 한 줄짜리 이름표다.
+    title: Annotated[str, AfterValidator(one_line)] = Field(min_length=1, max_length=200)
     created_by: str = Field(min_length=1)
     status: str = Field(default="todo", pattern="^(todo|active|done)$")
 
 
 class BoardNodeUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
+    title: Annotated[str, AfterValidator(one_line)] | None = Field(
+        default=None, min_length=1, max_length=200
+    )
     status: str | None = Field(default=None, pattern="^(todo|active|done)$")
 
 

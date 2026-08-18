@@ -372,6 +372,30 @@ class FungisDB:
         # 닫힌 HQ가 자리를 붙들면 새 HQ를 영영 못 만든다. 이 코드의 다른
         # "하나만" 인덱스 중 삭제 술어를 가진 것은 unique_active_role_name
         # 하나뿐인데, 여기서는 그쪽을 본보기로 삼는다.
+        if "ticket_prefix" not in project_columns:
+            # 티켓 이름은 방마다 다르다. 프리픽스가 방을 들고 다니므로
+            # ARCH-12 한 토큰이 어느 방 몇 번인지 다 말한다. 방 이름을 바꿔도
+            # 프리픽스는 안 따라간다 — 이미 붙은 티켓 이름이 흔들리면 안 된다.
+            self._connection.execute(
+                "ALTER TABLE projects ADD COLUMN ticket_prefix TEXT"
+            )
+        self._connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS one_prefix_per_board
+               ON projects(ticket_prefix) WHERE ticket_prefix IS NOT NULL"""
+        )
+        node_columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(board_nodes)")
+        }
+        if "number" not in node_columns:
+            # 방 안에서 1부터 센다. 전역으로 세면 방이 독립인데 번호만 HQ가
+            # 나눠주는 꼴이 되고, 보드에서 뗀 방의 번호가 구멍으로 남는다.
+            self._connection.execute("ALTER TABLE board_nodes ADD COLUMN number INTEGER")
+            self._backfill_ticket_numbers()
+        self._connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS one_number_per_project
+               ON board_nodes(project_id, number) WHERE number IS NOT NULL"""
+        )
         self._connection.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS one_live_hq
                ON projects(kind) WHERE kind = 'hq' AND archived_at IS NULL"""
@@ -577,7 +601,7 @@ class FungisDB:
         """
         with self._lock:
             tracks = self._connection.execute(
-                """SELECT id, name FROM projects
+                """SELECT id, name, ticket_prefix FROM projects
                    WHERE parent_id IS NOT NULL AND archived_at IS NULL
                    ORDER BY name"""
             ).fetchall()
@@ -589,8 +613,12 @@ class FungisDB:
             ).fetchall()
         done = {row["id"] for row in nodes if row["status"] == "done"}
         waits: dict[str, list[str]] = {}
+        # 역방향도 같이 만든다. 선행 쪽이 자기가 누구를 막고 있는지 모르면
+        # 끝내고 알릴 상대를 알 수 없다.
+        blocks: dict[str, list[str]] = {}
         for edge in edges:
             waits.setdefault(edge["node_id"], []).append(edge["waits_for"])
+            blocks.setdefault(edge["waits_for"], []).append(edge["node_id"])
         by_track: dict[str, list[dict[str, Any]]] = {}
         for row in nodes:
             node = dict(row)
@@ -599,6 +627,7 @@ class FungisDB:
             # 대기는 저장하지 않고 여기서 읽는다. 안 시작했는데 선행이 남아
             # 있으면 못 하는 것이지 안 하는 것이 아니다.
             node["blocked_by"] = sorted(blocked)
+            node["blocks"] = sorted(blocks.get(node["id"], []))
             node["state"] = (
                 "waiting" if node["status"] == "todo" and blocked else node["status"]
             )
@@ -607,6 +636,7 @@ class FungisDB:
             {
                 "project_id": track["id"],
                 "project_name": track["name"],
+                "ticket_prefix": track["ticket_prefix"],
                 "nodes": by_track.get(track["id"], []),
             }
             for track in tracks
@@ -667,10 +697,14 @@ class FungisDB:
             ).fetchone()
             if row is None or row["parent_id"] is None:
                 raise LookupError("project is not on the board")
+            next_number = conn.execute(
+                "SELECT COALESCE(MAX(number), 0) + 1 FROM board_nodes WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()[0]
             conn.execute(
-                """INSERT INTO board_nodes(id, project_id, title, status, created_by)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (node_id, project_id, title, status, created_by),
+                """INSERT INTO board_nodes(id, project_id, title, status, created_by, number)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (node_id, project_id, title, status, created_by, next_number),
             )
             return dict(
                 conn.execute(
@@ -770,6 +804,52 @@ class FungisDB:
                    ORDER BY p.created_at, p.name"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def ticket_prefix_for(name: str, taken: set[str]) -> str:
+        """방 이름에서 프리픽스를 만든다. 겹치면 숫자를 붙인다.
+
+        사람이 고쳐도 되는 값이라 여기서는 첫 제안만 만든다. 라틴 문자가
+        없으면 이름 앞을 그대로 쓴다 — 한글 방 이름도 있다.
+        """
+        letters = [c for c in name.upper() if c.isalnum()]
+        latin = [c for c in letters if c.isascii()]
+        base = "".join((latin or letters)[:4]) or "T"
+        if base not in taken:
+            return base
+        for suffix in range(2, 100):
+            candidate = f"{base}{suffix}"
+            if candidate not in taken:
+                return candidate
+        raise ValueError("no free ticket prefix")
+
+    def _backfill_ticket_numbers(self) -> None:
+        """이미 있던 것에 만든 순서대로 번호를 붙인다. 지우고 다시 만들지 않는다."""
+        rows = self._connection.execute(
+            "SELECT id, project_id FROM board_nodes ORDER BY project_id, created_at, id"
+        ).fetchall()
+        counters: dict[str, int] = {}
+        for row in rows:
+            counters[row["project_id"]] = counters.get(row["project_id"], 0) + 1
+            self._connection.execute(
+                "UPDATE board_nodes SET number = ? WHERE id = ?",
+                (counters[row["project_id"]], row["id"]),
+            )
+        taken = {
+            row["ticket_prefix"]
+            for row in self._connection.execute(
+                "SELECT ticket_prefix FROM projects WHERE ticket_prefix IS NOT NULL"
+            )
+        }
+        for row in self._connection.execute(
+            """SELECT id, name FROM projects
+               WHERE ticket_prefix IS NULL AND kind != 'hq' ORDER BY created_at, id"""
+        ).fetchall():
+            prefix = self.ticket_prefix_for(row["name"], taken)
+            taken.add(prefix)
+            self._connection.execute(
+                "UPDATE projects SET ticket_prefix = ? WHERE id = ?", (prefix, row["id"])
+            )
 
     def create_project(self, *, name: str, project_id: str | None = None) -> dict[str, Any]:
         project_id = project_id or str(uuid.uuid4())

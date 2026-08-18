@@ -4,6 +4,7 @@
 상태: 로컬 실사용 가능한 SwiftUI 개발 빌드
 
 제품 명세: [PRODUCT_SPEC.md](PRODUCT_SPEC.md)
+보드 프로토콜: [BOARD_PROTOCOL.md](BOARD_PROTOCOL.md) — 에이전트가 보드를 읽고 쓰는 법
 저장소 상태: 로컬 Git repository, branch `cross-project`. 구현 기준 SHA는 아래 착지 정보에 기록한다.
 
 ## 읽는 순서
