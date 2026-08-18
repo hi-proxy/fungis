@@ -82,16 +82,90 @@ def current_binding(registry: LocalRegistry, adapter: CmuxAdapter) -> dict:
     return binding
 
 
+# 옛 문법은 조용히 죽으면 안 된다. argparse 기본 오류는 무엇이 없는지만
+# 말하고 무엇으로 바뀌었는지는 말하지 않아서, 새 맥락에서 시작한 에이전트는
+# 같은 것을 다시 친다.
+LEGACY_FLAGS = {
+    "--role": '--role 은 --to 로 바뀌었다.  fungis reply --to ROLE "..."',
+    "--reference": '--reference 는 --cc 로 바뀌었다.  fungis reply --cc ROLE "..."',
+    "--in-reply-to": '--in-reply-to 는 --reply 로 바뀌었다.  '
+                     'fungis send --reply N "..."',
+}
+
+LEGACY_ASK = 'ask 는 없어졌다.  fungis send --project HQ --to <방> "..."'
+
+LEGACY_REPLY_PROJECT = (
+    "reply 의 --project 는 없어졌다. 답하려면 "
+    'fungis send --project ... --reply N 을 쓴다'
+)
+
+
+def legacy_hint(argv: list[str]) -> str | None:
+    """옛 문법이면 무엇으로 바뀌었는지 한 줄로 돌려준다."""
+    command = next((item for item in argv if not item.startswith("-")), None)
+    if command == "ask":
+        return LEGACY_ASK
+    for item in argv:
+        name = item.split("=", 1)[0]
+        if name in LEGACY_FLAGS:
+            return LEGACY_FLAGS[name]
+    if command == "reply" and any(
+        item.split("=", 1)[0] in ("--project", "-p") for item in argv
+    ):
+        return LEGACY_REPLY_PROJECT
+    return None
+
+
+class Parser(argparse.ArgumentParser):
+    """옛 이름을 치면 새 이름을 알려주고 멈춘다."""
+
+    def parse_args(self, args=None, namespace=None):  # type: ignore[override]
+        given = list(sys.argv[1:] if args is None else args)
+        hint = legacy_hint(given)
+        if hint is not None:
+            raise SystemExit(hint)
+        return super().parse_args(args, namespace)
+
+    def error(self, message):  # type: ignore[override]
+        # argparse는 자리 인자가 옵션으로 두 토막 나면 남은 토막을 모른다고만
+        # 한다. 참조 번호와 본문 사이에 옵션을 끼운 것이 그 경우다.
+        if message.startswith("unrecognized arguments"):
+            message += (
+                "\n참조 번호와 본문은 붙여서 쓴다. 그 사이에 옵션을 끼우지 "
+                '마라: fungis reply 42 "..." --track ...'
+            )
+        super().error(message)
+
+
+ADDRESSING = """Addressing
+  --to ROLE       who receives it, by role; repeat for more
+  --to-id ID      who receives it, by absolute id; dies when the session changes
+  --cc ROLE       who only listens, by role; repeat for more
+  --cc-id ID      who only listens, by absolute id
+
+--to NARROWS the default recipient, it does not add to it. With --to the
+default is gone: name every recipient you want.
+
+Default recipient when you name none
+  send in a normal room     nobody; it stays in the timeline only
+  reply in a normal room    PM
+  request in a normal room  PM
+  anything in HQ            every lead convened there
+"""
+
+
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(
+    result = Parser(
         prog="fungis",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Read and write the shared Fungis project room from an attached agent.",
         epilog="""Typical flow:
   fungis init --project PROJECT_ID
+  fungis state
   fungis inbox
   fungis history 20
-  fungis reply \"implementation complete\"
+  fungis reply 42 \"implementation complete\"
+  fungis send \"note for the record\"
   fungis request --level r3 \"approval required\"
 
 inbox is the agent's new-message feed. history is the shared project room.
@@ -137,32 +211,82 @@ Use role names as stable addresses; session names may change.""",
     board_unwait = board_actions.add_parser("unwait", help="cut that dependency")
     board_unwait.add_argument("ticket")
     board_unwait.add_argument("blocker")
-    ask = commands.add_parser(
-        "ask", help="ask another project's lead a question on the board"
+    state = commands.add_parser(
+        "state", help="read who you are and which rooms you sit in",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""state only reads. It changes nothing, so it is safe to call
+whenever you have lost track of where you are. init is not: it switches your
+active project.
+
+  fungis state                    every room you hold a role in
+  fungis state --project fungis   one room's roles, who holds them, who leads
+
+NONE means the value is empty. - means it does not apply.
+Another room's member list is for its lead only.""",
     )
-    ask.add_argument(
-        "project", help="room to ask: its ticket prefix (ARCH), name, or id"
+    state.add_argument(
+        "-p", "--project",
+        help="one room in detail: its ticket prefix (ARCH), name, or id",
     )
-    ask.add_argument("body", nargs="+")
-    history = commands.add_parser("history", help="read shared project history")
+    history = commands.add_parser(
+        "history", help="read shared project history",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""  fungis history 20
+  fungis history 20 --project HQ
+  fungis history --ref 42          pull one message out by its number""",
+    )
     history.add_argument("count", nargs="?", type=int, default=20)
     history.add_argument("--after", type=int)
-    history.add_argument("--project")
-    reply = commands.add_parser(
-        "reply", help="send a message (defaults to PM)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Examples:
-  fungis reply \"done\"
-  fungis reply --role reviewer \"please review\"
-  fungis reply --track feature/login --tag commit/abc123 \"implemented\"
-  fungis reply --in-reply-to 42 \"verified\"
-
---in-reply-to inherits the parent message's track and tags by default.
-Successful output echoes the exact body stored by the server.""",
+    history.add_argument(
+        "--ref", type=int,
+        help="one message only, named by its number in the room",
     )
-    add_message_arguments(reply)
+    history.add_argument(
+        "-p", "--project",
+        help="room to read: its ticket prefix (ARCH), name, or id",
+    )
+    reply = commands.add_parser(
+        "reply", help="answer a message; defaults to PM",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Answering is the job, so what you answer comes first.
+
+  fungis reply \"done\"
+  fungis reply 42 \"verified\"
+  fungis reply --to reviewer \"please review\"
+  fungis reply 42 \"implemented\" --track feature/login --tag commit/abc123
+
+REF and the body sit next to each other. Do not put an option between them.
+
+REF is the message's number in this room. The room is the one you are in;
+reply has no --project. To answer inside another room use
+fungis send --project ... --reply N.
+
+Answering inherits the parent message's track and tags by default.
+Successful output echoes the exact body stored by the server.
+
+"""
+        + ADDRESSING,
+    )
+    reply.add_argument(
+        "ref", nargs="?", help="the message you answer: its number in this room"
+    )
+    add_addressing(reply)
+    send = commands.add_parser(
+        "send", help="leave a message at a place; no recipient by default",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""send puts a message somewhere rather than addressing someone.
+
+  fungis send \"note for the record\"        your room; wakes nobody
+  fungis send --project HQ \"heads up\"      every lead convened in HQ
+  fungis send --project HQ --to ARCH \"…\"  that room's lead
+  fungis send --reply 42 \"…\"               answering is the exception here
+
+"""
+        + ADDRESSING,
+    )
+    add_addressing(send, project=True, reply=True)
     request = commands.add_parser(
-        "request", help="request attention or approval",
+        "request", help="request attention or approval; defaults to PM",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Levels:
   r1  informational request
@@ -170,13 +294,16 @@ Successful output echoes the exact body stored by the server.""",
   r3  explicit PM confirmation or approval required
 
 Examples:
-  fungis request --level r2 --role reviewer \"review this change\"
+  fungis request --level r2 --to reviewer \"review this change\"
   fungis request --level r3 --track release/1.0 --tag commit/abc123 \"approve release\"
 
---in-reply-to inherits the parent message's track and tags by default.
-Successful output echoes the exact body stored by the server.""",
+--reply inherits the parent message's track and tags by default.
+Successful output echoes the exact body stored by the server.
+
+"""
+        + ADDRESSING,
     )
-    add_message_arguments(request, include_level=True)
+    add_addressing(request, project=True, reply=True, level=True)
     shared = commands.add_parser("shared", help="read selected shared SSOT keys")
     shared.add_argument("keys", nargs="+")
     work = commands.add_parser("work", help="track structured work time and reports")
@@ -187,23 +314,37 @@ Successful output echoes the exact body stored by the server.""",
     return result
 
 
-def add_message_arguments(
-    command: argparse.ArgumentParser, *, include_level: bool = False
+def add_addressing(
+    command: argparse.ArgumentParser,
+    *,
+    project: bool = False,
+    reply: bool = False,
+    level: bool = False,
 ) -> None:
+    """주소 문법은 넷뿐이다. 같은 일을 다른 낱말로 부르지 않는다."""
     command.add_argument("body", nargs="+", help="message body; maximum 20,000 characters")
-    if include_level:
+    if level:
         command.add_argument(
             "--level", choices=("r1", "r2", "r3"), default="r2",
             help="attention level: r1 info, r2 review, r3 PM approval",
         )
-    command.add_argument("--to", help="direct recipient local name or principal ID")
     command.add_argument(
-        "--role", action="append", default=[],
-        help="stable role recipient; repeat for multiple roles",
+        "-t", "--to", action="append", default=[],
+        help="recipient by role; repeat for more. In HQ a room name works too. "
+             "It NARROWS the default recipient, it does not add to it",
     )
     command.add_argument(
-        "--reference", action="append", default=[],
-        help="CC without inbox delivery; repeat for multiple references",
+        "--to-id", action="append", default=[],
+        help="recipient by absolute id; dies when the session changes. "
+             "It narrows the default recipient just like --to",
+    )
+    command.add_argument(
+        "-c", "--cc", action="append", default=[],
+        help="copy by role: delivered, but marked listen-only; repeat for more",
+    )
+    command.add_argument(
+        "--cc-id", action="append", default=[],
+        help="copy by absolute id; dies when the session changes",
     )
     command.add_argument(
         "--track",
@@ -213,16 +354,21 @@ def add_message_arguments(
         "--tag", action="append",
         help="secondary metadata; repeat, e.g. commit/abc123 or ticket/ARC-42",
     )
-    command.add_argument(
-        "--in-reply-to", type=int,
-        help="parent message seq; inherits its track and tags unless disabled",
-    )
-    command.add_argument(
-        "--project", help="project ID override; defaults to init/inbox project",
-    )
+    if reply:
+        command.add_argument(
+            "--reply", type=int,
+            help="the message you answer: its number in this room; "
+                 "inherits its track and tags unless disabled",
+        )
+    if project:
+        command.add_argument(
+            "-p", "--project",
+            help="room to speak in: its ticket prefix (ARCH), name, or id; "
+                 "defaults to your own room",
+        )
     command.add_argument(
         "--no-inherit-context", action="store_true",
-        help="do not inherit track and tags from --in-reply-to",
+        help="do not inherit track and tags from the message you answer",
     )
 
 
@@ -249,18 +395,23 @@ def format_bootstrap(value: dict) -> str:
             "commands:",
             f"- read: {usage['inbox']}",
             f"- restore context: {usage['history']}",
-            f"- reply PM: {usage['reply_pm']}",
-            f"- message role: {usage['message_role']}",
             # CLI는 소스를 매번 읽지만 서버는 재시작해야 바뀐다. 그 사이에
             # 새 CLI가 옛 서버를 만나므로 없는 키로 죽지 않게 둔다.
+            "- where you are: " + usage.get("state", "fungis state"),
+            f"- reply PM: {usage['reply_pm']}",
+            f"- message role: {usage['message_role']}",
             "- copy role (listen only): "
-            + usage.get("copy_role", 'fungis reply --ref ROLE "..."'),
+            + usage.get("copy_role", 'fungis reply --cc ROLE "..."'),
+            "- leave a note without addressing anyone: "
+            + usage.get("send", 'fungis send "..."'),
             f"- request review/approval: {usage['request_review']} / {usage['request_approval']}",
             f"- work: {usage['work_start']} / {usage['work_report']} / {usage['work_done']}",
             # 보드에 올리는 것은 그 방의 몫이다. 안 알려주면 PM이 대신 쳐 넣게
             # 되고, 그러면 보드는 PM이 이미 아는 것만 담는다.
             '- board: fungis board / fungis board add "..." / '
-            "fungis board start ID / fungis board done ID",
+            "fungis board start ID / fungis board done ID / "
+            # 기다린다는 것을 못 적으면 막힌 일이 보드에서 안 막힌 것으로 보인다.
+            "fungis board wait ID BLOCKER / fungis board unwait ID BLOCKER",
             f"- recovery: {usage['recovery']}",
             "Use role names as stable addresses. Report results and blockers through Fungis.",
             # 명령 목록만으로는 언제 쓰는지 모른다. 새 세션마다 맥락 없이
@@ -417,8 +568,10 @@ def emit_inbox(messages: list[dict]) -> None:
         }
         if len(rooms) > 1:
             print(
-                "여러 방에서 왔다. 답할 때 --project로 방을 지정한다. "
-                "각 메시지의 project 값을 쓰면 된다.",
+                # reply 에는 --project 가 없다. 다른 방에 답하는 것은 send 다.
+                "여러 방에서 왔다. 자기 방이 아닌 곳에 답할 때는 "
+                'fungis send --project <project> --reply <seq> "..." 를 쓴다. '
+                "각 메시지의 project 와 seq 값을 그대로 넣으면 된다.",
                 file=sys.stderr,
             )
         chain = max(int(message.get("agent_chain") or 0) for message in messages)
@@ -493,6 +646,170 @@ def render_board(board: list[dict], you: str | None = None, role: str | None = N
                 row.append("blocks " + " ".join(holding))
             lines.append("  ".join(row))
     return "\n".join(lines)
+
+
+STATE_LABEL = 10
+
+
+def _columns(rows: list[list[str]]) -> list[str]:
+    """마지막 칸을 뺀 나머지를 그 칸의 최대 너비 + 2로 맞춘다."""
+    if not rows:
+        return []
+    widths = [
+        max(len(row[index]) for row in rows) + 2
+        for index in range(len(rows[0]) - 1)
+    ]
+    return [
+        "".join(
+            cell if index == len(row) - 1 else f"{cell:<{widths[index]}}"
+            for index, cell in enumerate(row)
+        ).rstrip()
+        for row in rows
+    ]
+
+
+def render_state(you: str, agent_id: str, rooms: list[dict]) -> str:
+    """내가 누구이고 어느 방에 어떤 자격으로 앉아 있나.
+
+    render_board와 같은 줄 프로토콜이다. 방 이름은 따옴표로 감싼다 — 이름에
+    공백이 있으면 칸이 밀린다.
+
+    lead 칸이 you 면 그 방을 내가 이끈다는 뜻이고, - 는 아무도 이끌지 않는다는
+    뜻이다. 이 둘을 같은 글자로 적으면 소집을 누가 받는지 알 수 없다.
+    """
+    lines = [f"{'you':<{STATE_LABEL}}{you}"]
+    rows = []
+    for room in rooms:
+        role = " ".join(f"@{name}" for name in room.get("my_roles", [])) or "-"
+        lead = room.get("lead")
+        if not lead:
+            mark = "-"
+        elif lead.get("agent_id") and lead["agent_id"] == agent_id:
+            mark = "you"
+        else:
+            mark = f"@{lead['name']}"
+        rows.append([f'"{room["project_name"]}"', role, mark])
+    lines.extend(f"{'project':<{STATE_LABEL}}{line}" for line in _columns(rows))
+    return "\n".join(lines)
+
+
+def render_members(members: dict, agent_id: str) -> str:
+    """방 하나의 역할·담당자·lead 여부.
+
+    NONE은 값이 비었다는 뜻이고 -는 해당 없음이라는 뜻이다. 빈 자리와 lead가
+    아닌 것은 다른 사실이라 같은 글자로 적지 않는다.
+
+    역할과 lead를 다시 적지 않는다. 목록에 이미 있는 것을 상세에 또 적으면
+    어느 쪽이 최신인지 재는 일이 생긴다.
+    """
+    lines = [f"{'project':<{STATE_LABEL}}\"{members['project_name']}\""]
+    rows = []
+    for role in members.get("roles", []):
+        if not role.get("agent_id"):
+            owner = "NONE"
+        elif role["agent_id"] == agent_id:
+            owner = "you"
+        else:
+            owner = role.get("agent_name") or role["agent_id"]
+        rows.append([f"@{role['name']}", owner, "lead" if role.get("is_lead") else "-"])
+    lines.extend(f"{'member':<{STATE_LABEL}}{line}" for line in _columns(rows))
+    return "\n".join(lines)
+
+
+def resolve_project(client, given: str | None, fallback: str) -> str:
+    """프리픽스도 방 이름도 id도 받는다. HQ는 그 이름 그대로 받는다.
+
+    보드에 붙지 않은 방은 트랙이 없어서 resolve_room이 모른다. 그럴 때만 방
+    목록을 한 번 더 본다 — 못 찾으면 조용히 넘기지 않고 아는 방을 보여준다.
+    조용히 넘기면 오타 하나가 "너는 그 방 소속이 아니다"로 되돌아온다.
+    """
+    if not given:
+        return fallback
+    wanted = given.strip()
+    hq = client.hq()
+    if hq is not None and wanted.casefold() in {
+        "hq", str(hq["id"]).casefold(), str(hq.get("name") or "").casefold()
+    }:
+        return str(hq["id"])
+    try:
+        return resolve_room(client.board(), wanted)
+    except RuntimeError as error:
+        for project in client.projects():
+            if wanted == project["id"] or wanted.casefold() == project["name"].casefold():
+                return str(project["id"])
+        raise error
+
+
+def reply_reference(ref: str | None) -> int | None:
+    """reply의 첫 인자는 답할 글 번호다.
+
+    본문을 따옴표 없이 치면 첫 낱말이 여기로 들어온다. 그때 조용히 본문으로
+    되돌리면 참조 없는 글이 나가고, 보낸 쪽은 참조를 걸었다고 믿는다.
+    """
+    if ref is None:
+        return None
+    if not ref.isdigit():
+        raise RuntimeError(
+            f'reply 의 첫 인자는 답할 글 번호다. "{ref}" 는 번호가 아니다. '
+            '본문은 따옴표로 감싼다: fungis reply "..." 또는 fungis reply 42 "..."'
+        )
+    return int(ref)
+
+
+def addressing(client, args) -> tuple[list[str], list[str], list[str], list[str]]:
+    """--to/--to-id/--cc/--cc-id를 서버가 아는 네 자리로 가른다.
+
+    --to는 먼저 이 방의 역할로 읽는다. 역할이 아니면 그대로 수신자 자리에
+    넣는다 — HQ에서 방 이름을 주면 서버가 그 방 lead로 푼다.
+    """
+    known: set[str] = set()
+    if args.to:
+        for role in client.roles():
+            known.add(role["name"])
+            known.add(role["id"])
+    role_ids = [value for value in args.to if value in known]
+    direct = [value for value in args.to if value not in known]
+    direct.extend(args.to_id)
+    return role_ids, direct, list(args.cc), list(args.cc_id)
+
+
+def default_recipients(client, command: str) -> list[str]:
+    """아무도 지목하지 않았을 때 누가 받나.
+
+    HQ에서 지정하지 않는 것은 소집된 lead 전원을 뜻한다. 그건 서버가 푸는
+    것이라 여기서는 빈 목록을 그대로 보낸다.
+
+    일반 방의 send는 주소 없이 자리에 붙이는 것이라 아무도 받지 않는다.
+    reply와 request는 답과 요청이라 받을 사람이 없으면 하지 않은 것과 같다.
+    """
+    hq = client.hq()
+    if hq is not None and str(hq["id"]) == client.workspace_id:
+        return []
+    if command == "send":
+        return []
+    return [str(client.pm_id)]
+
+
+def read_state(client, binding: dict, given: str | None) -> str:
+    """부작용 없이 처지만 읽는다. init은 활성 프로젝트를 바꾸므로 못 쓴다."""
+    agent_id = binding["principal_id"]
+    if given:
+        room = resolve_project(client, given, client.workspace_id)
+        return render_members(client.members(room), agent_id)
+    rooms: dict[str, dict] = {}
+    for membership in client.agent_role_memberships():
+        if membership["agent_id"] != agent_id:
+            continue
+        room = rooms.setdefault(
+            membership["project_id"],
+            {"project_name": membership["project_name"], "my_roles": []},
+        )
+        room["my_roles"].append(membership["role_name"])
+    for project_id, room in rooms.items():
+        room["lead"] = client.members(project_id).get("lead")
+    return render_state(
+        binding.get("local_name") or agent_id, agent_id, list(rooms.values())
+    )
 
 
 def ticket_names(board: list[dict]) -> dict[str, str]:
@@ -633,7 +950,9 @@ def write_error_message(error: Exception) -> str:
         f"{error}\n"
         "Hint: initialize or refresh project context first: "
         "fungis init --project PROJECT_ID. "
-        "Then retry reply/request; use fungis history 20 to verify room context."
+        "Then retry reply/send/request; "
+        "use fungis state to see where you are and fungis history 20 to verify "
+        "room context."
     )
 
 
@@ -668,19 +987,29 @@ def main() -> None:
                 registry.set_state(
                     f"active_project:{binding['principal_id']}", rooms.pop()
                 )
+        elif args.command == "state":
+            client = PMClient(
+                config["server"], registry,
+                workspace_id=active_project(registry, binding["principal_id"]),
+                caller_id=binding["principal_id"],
+            )
+            print(read_state(client, binding, args.project))
         elif args.command == "history":
             if not 1 <= args.count <= 500:
                 raise RuntimeError("history count must be between 1 and 500")
-            workspace_id = args.project or active_project(
-                registry, binding["principal_id"]
-            )
+            mine = active_project(registry, binding["principal_id"])
             # 에이전트가 자기 이름으로 읽는다. PM 이름을 빌리면 아무 방이나
             # 열린다.
             client = PMClient(
-                config["server"], registry, workspace_id=workspace_id,
+                config["server"], registry, workspace_id=mine,
                 caller_id=binding["principal_id"],
             )
-            messages = client.timeline(args.count, after_project_seq=args.after)
+            workspace_id = resolve_project(client, args.project, mine)
+            client.workspace_id = workspace_id
+            if args.ref is not None:
+                messages = [client.message(args.ref)]
+            else:
+                messages = client.timeline(args.count, after_project_seq=args.after)
             print(
                 json.dumps(
                     compact_history(workspace_id, messages),
@@ -715,70 +1044,41 @@ def main() -> None:
                 print(ticket_line(client.board(), node_id))
             else:
                 print(render_board(board, you=mine, role=own_role_name(binding)))
-        elif args.command == "ask":
-            client = PMClient(
-                config["server"], registry,
-                caller_id=binding["principal_id"],
-            )
-            hq = client.hq()
-            if hq is None:
-                raise RuntimeError("no board to ask on yet")
-            room = resolve_room(client.board(), args.project)
-            lead = client.lead_of(room)
-            if lead is None or not lead.get("agent_id"):
-                # lead 자리가 비면 PM이 받는다. HQ에 남으니 PM이 거기서 본다.
-                raise RuntimeError(
-                    f"{args.project} has no lead right now — ask the PM instead"
-                )
-            client.workspace_id = hq["id"]
-            result = client.send_as(
-                binding["local_name"], lead["agent_id"], " ".join(args.body)
-            )
-            print(json.dumps(stored_echo(result), ensure_ascii=False))
         elif args.command == "permission-gate":
             print(json.dumps(permission_gate(config, registry, binding, args.wait)))
         elif args.command == "permission-clear":
             print(json.dumps(permission_clear(config, registry, binding)))
-        elif args.command == "reply":
-            workspace_id = args.project or active_project(
-                registry, binding["principal_id"]
+        elif args.command in ("reply", "send", "request"):
+            if args.command == "reply":
+                in_reply_to = reply_reference(args.ref)
+                given_project = None
+            else:
+                in_reply_to = args.reply
+                given_project = args.project
+            mine = active_project(registry, binding["principal_id"])
+            client = PMClient(
+                config["server"], registry, workspace_id=mine,
+                caller_id=binding["principal_id"],
             )
-            client = PMClient(config["server"], registry, workspace_id=workspace_id)
-            recipient = args.to or (None if args.role else str(client.pm_id))
+            client.workspace_id = resolve_project(client, given_project, mine)
+            role_ids, direct, cc, cc_ids = addressing(client, args)
+            if not role_ids and not direct:
+                direct = default_recipients(client, args.command)
             result = client.send_as(
-                binding["local_name"], recipient, " ".join(args.body),
-                reference_ids=args.reference,
-                in_reply_to_project_seq=args.in_reply_to,
+                binding["local_name"], None, " ".join(args.body),
+                recipient_ids=direct,
+                role_ids=role_ids,
+                reference_ids=cc,
+                absolute_reference_ids=cc_ids,
+                kind="pm_request" if args.command == "request" else "message",
+                reply_level=args.level if args.command == "request" else "r1",
+                in_reply_to_project_seq=in_reply_to,
                 track=args.track,
                 tags=args.tag,
                 inherit_context=not args.no_inherit_context,
-                role_ids=args.role,
             )
             print(json.dumps(
-                stored_echo(result, roles=args.role, in_reply_to=args.in_reply_to),
-                ensure_ascii=False,
-            ))
-        elif args.command == "request":
-            workspace_id = args.project or active_project(
-                registry, binding["principal_id"]
-            )
-            client = PMClient(config["server"], registry, workspace_id=workspace_id)
-            recipient = args.to or (None if args.role else str(client.pm_id))
-            result = client.send_as(
-                binding["local_name"],
-                recipient,
-                " ".join(args.body),
-                kind="pm_request",
-                reply_level=args.level,
-                reference_ids=args.reference,
-                in_reply_to_project_seq=args.in_reply_to,
-                track=args.track,
-                tags=args.tag,
-                inherit_context=not args.no_inherit_context,
-                role_ids=args.role,
-            )
-            print(json.dumps(
-                stored_echo(result, roles=args.role, in_reply_to=args.in_reply_to),
+                stored_echo(result, roles=role_ids, in_reply_to=in_reply_to),
                 ensure_ascii=False,
             ))
         elif args.command == "shared":
@@ -823,7 +1123,7 @@ def main() -> None:
                 )
             )
     except PMServerError as error:
-        if "args" in locals() and args.command in {"reply", "request"}:
+        if "args" in locals() and args.command in {"reply", "send", "request"}:
             raise SystemExit(write_error_message(error)) from error
         raise SystemExit(str(error)) from error
     except RuntimeError as error:

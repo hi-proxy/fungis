@@ -302,6 +302,8 @@ class PMClient:
         recipient_id: str | None,
         body: str,
         *,
+        recipient_ids: list[str] | None = None,
+        absolute_reference_ids: list[str] | None = None,
         kind: str = "message",
         reply_level: str = "r1",
         reference_ids: list[str] | None = None,
@@ -318,17 +320,21 @@ class PMClient:
             {
                 "workspace_id": self.workspace_id,
                 "sender_id": self._recipient_id(sender_id),
-                "recipient_ids": (
-                    [self._recipient_id(recipient_id)] if recipient_id else []
-                ),
+                "recipient_ids": [
+                    self._recipient_id(value)
+                    for value in ([recipient_id] if recipient_id else [])
+                    + list(recipient_ids or [])
+                ],
                 "role_ids": [self._role_id(role_id) for role_id in (role_ids or [])],
                 "body": body,
                 "kind": kind,
                 "reply_level": reply_level,
+                # 절대 id 로 준 참조는 풀지 않는다. 이 방 명부에 없는 사람도
+                # 지목할 수 있어야 하고, HQ 에는 명부 자체가 없다.
                 "reference_ids": [
                     self._reference_id(reference_id)
                     for reference_id in (reference_ids or [])
-                ],
+                ] + list(absolute_reference_ids or []),
                 "in_reply_to": in_reply_to,
                 "in_reply_to_project_seq": in_reply_to_project_seq,
                 "track": track,

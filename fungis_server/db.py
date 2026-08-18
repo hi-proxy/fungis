@@ -1621,9 +1621,13 @@ class FungisDB:
             "usage": {
                 "inbox": "fungis inbox",
                 "history": "fungis history 20",
+                # 새 세션은 여기서 문법을 배운다. 옛 이름을 남겨 두면 에이전트가
+                # 계속 그것을 치고, 고쳐야 할 곳이 CLI 가 아니라 여기가 된다.
+                "state": "fungis state",
                 "reply_pm": 'fungis reply "..."',
-                "message_role": 'fungis reply --role ROLE "..."',
-                "copy_role": 'fungis reply --ref ROLE "..."',
+                "message_role": 'fungis reply --to ROLE "..."',
+                "copy_role": 'fungis reply --cc ROLE "..."',
+                "send": 'fungis send "..."',
                 "request_review": 'fungis request --level r2 "..."',
                 "request_approval": 'fungis request --level r3 "..."',
                 "work_start": 'fungis work start "..."',
