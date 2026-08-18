@@ -85,7 +85,18 @@ Use role names as stable addresses; session names may change.""",
         "permission-clear",
         help="mark this session's pending permission notice as handled",
     )
-    commands.add_parser("board", help="read the cross-project board")
+    board = commands.add_parser(
+        "board", help="read the cross-project board, or put your work on it"
+    )
+    # 노드는 그 방이 올린다. PM이 대신 쳐 넣으면 PM이 이미 아는 것을 옮겨 적는
+    # 일이 되고, 보드는 아무것도 알려주지 않는 화면이 된다.
+    board_actions = board.add_subparsers(dest="board_command")
+    board_add = board_actions.add_parser("add", help="put one item on your track")
+    board_add.add_argument("title", nargs="+")
+    board_start = board_actions.add_parser("start", help="mark an item as in progress")
+    board_start.add_argument("node_id")
+    board_done = board_actions.add_parser("done", help="mark an item as finished")
+    board_done.add_argument("node_id")
     ask = commands.add_parser(
         "ask", help="ask another project's lead a question on the board"
     )
@@ -204,6 +215,10 @@ def format_bootstrap(value: dict) -> str:
             + usage.get("copy_role", 'fungis reply --ref ROLE "..."'),
             f"- request review/approval: {usage['request_review']} / {usage['request_approval']}",
             f"- work: {usage['work_start']} / {usage['work_report']} / {usage['work_done']}",
+            # 보드에 올리는 것은 그 방의 몫이다. 안 알려주면 PM이 대신 쳐 넣게
+            # 되고, 그러면 보드는 PM이 이미 아는 것만 담는다.
+            '- board: fungis board / fungis board add "..." / '
+            "fungis board start ID / fungis board done ID",
             f"- recovery: {usage['recovery']}",
             "Use role names as stable addresses. Report results and blockers through Fungis.",
             # 명령 목록만으로는 언제 쓰는지 모른다. 새 세션마다 맥락 없이
@@ -531,10 +546,27 @@ def main() -> None:
                 config["server"], registry,
                 caller_id=binding["principal_id"],
             )
-            print(json.dumps(
-                compact_board(client.board()),
-                ensure_ascii=False, separators=(",", ":"),
-            ))
+            if args.board_command == "add":
+                node = client.create_board_node(
+                    project_id=active_project(registry, binding["principal_id"]),
+                    title=" ".join(args.title),
+                )
+                print(json.dumps(
+                    {"added": node["id"], "title": node["title"]},
+                    ensure_ascii=False, separators=(",", ":"),
+                ))
+            elif args.board_command in ("start", "done"):
+                status = "active" if args.board_command == "start" else "done"
+                node = client.update_board_node(args.node_id, status=status)
+                print(json.dumps(
+                    {"node": node["id"], "state": status},
+                    ensure_ascii=False, separators=(",", ":"),
+                ))
+            else:
+                print(json.dumps(
+                    compact_board(client.board()),
+                    ensure_ascii=False, separators=(",", ":"),
+                ))
         elif args.command == "ask":
             client = PMClient(
                 config["server"], registry,
