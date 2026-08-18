@@ -1,4 +1,5 @@
 import threading
+from pathlib import Path
 
 from fungis_node.cmux import CmuxAgentCandidate
 from fungis_node.registry import LocalRegistry
@@ -176,3 +177,35 @@ def test_daemon_starts_with_no_connected_agents(tmp_path, monkeypatch):
     ).run()
 
     assert served.is_set()
+
+
+def test_daemon_sends_wakes_unless_dry_run_is_asked_for():
+    """조용히 아무것도 안 하는 것이 기본값이면 안 된다.
+
+    예전에는 `--send`가 opt-in이라, 그 플래그 없이 손으로 띄운 daemon이 판정만
+    하고 깨우기를 한 건도 보내지 않았다. health는 200이고 로그에는 eligible이
+    찍혀서 앱도 사람도 정상으로 봤다. 사용자는 메시지가 안 온다는 것으로만
+    알았다.
+    """
+    from fungis_node.cli import parser, sends_wakes
+
+    for command in ("daemon", "demo", "stack"):
+        args = parser().parse_args([command])
+        assert sends_wakes(args), f"{command}는 기본으로 깨우기를 보내야 한다"
+
+        asked = parser().parse_args([command, "--dry-run"])
+        assert not sends_wakes(asked), f"{command} --dry-run은 보내지 않아야 한다"
+
+        # 옛 앱 번들이 그대로 넘기는 플래그다. 받아주되 동작을 바꾸지 않는다.
+        legacy = parser().parse_args([command, "--send"])
+        assert sends_wakes(legacy), f"{command} --send는 계속 받아야 한다"
+
+
+def test_supervisor_sends_wakes_when_the_caller_says_nothing():
+    """호출부가 깜빡해도 조용히 먹통이 되지는 않아야 한다."""
+    supervisor = NodeSupervisor(
+        registry_path=Path("unused.db"),
+        server_url="http://127.0.0.1:8787",
+        cmux=None,
+    )
+    assert supervisor.send_wakes

@@ -21,6 +21,28 @@ from .tui import run_tui
 from .web import run_web
 
 
+def add_wake_flags(command: argparse.ArgumentParser) -> None:
+    """깨우기는 기본으로 보낸다.
+
+    예전에는 `--send`를 켜야 보냈다. 그래서 그 플래그 없이 손으로 띄운 daemon이
+    판정만 하고 아무것도 보내지 않았고, health는 200이라 앱도 사람도 정상으로
+    봤다. 조용히 아무것도 안 하는 것이 기본값이면 안 된다. 안 보내려면 이제
+    `--dry-run`으로 말해야 한다. `--send`는 옛 앱 번들이 그대로 넘기므로
+    받아만 주고 무시한다.
+    """
+    command.add_argument("--send", action="store_true", help=argparse.SUPPRESS)
+    command.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="evaluate wakes without sending them",
+    )
+
+
+def sends_wakes(args: argparse.Namespace) -> bool:
+    return not getattr(args, "dry_run", False)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="fungis-node")
     result.add_argument(
@@ -51,17 +73,13 @@ def parser() -> argparse.ArgumentParser:
     demo.add_argument("--server", default="http://127.0.0.1:8787")
     demo.add_argument("--server-db", default=".fungis-server.db")
     demo.add_argument("--pm-name", default="PM")
-    demo.add_argument(
-        "--send", action="store_true", help="actually send eligible idle wakes"
-    )
+    add_wake_flags(demo)
     stack = subcommands.add_parser(
         "stack", help="run server and node independently from the PM chat UI"
     )
     stack.add_argument("--server", default="http://127.0.0.1:8787")
     stack.add_argument("--server-db", default=".fungis-server.db")
-    stack.add_argument(
-        "--send", action="store_true", help="actually send eligible idle wakes"
-    )
+    add_wake_flags(stack)
     daemon = subcommands.add_parser(
         "daemon", help="run server, node supervisor, and local control API"
     )
@@ -69,9 +87,7 @@ def parser() -> argparse.ArgumentParser:
     daemon.add_argument("--server-db", default=".fungis-server.db")
     daemon.add_argument("--host", default="127.0.0.1")
     daemon.add_argument("--port", type=int, default=8790)
-    daemon.add_argument(
-        "--send", action="store_true", help="actually send eligible idle wakes"
-    )
+    add_wake_flags(daemon)
     install_cli = subcommands.add_parser(
         "install-agent-cli", help="install the short fungis command"
     )
@@ -105,9 +121,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--server", default="http://127.0.0.1:8787")
     run.add_argument("--gate-interval", type=float, default=2.0)
     run.add_argument("--settle-seconds", type=float, default=5.0)
-    run.add_argument(
-        "--send", action="store_true", help="actually send eligible idle wakes"
-    )
+    add_wake_flags(run)
     pending = subcommands.add_parser("pending", help="show durable pending events")
     pending.add_argument("--recipient")
     gate = subcommands.add_parser("gate", help="evaluate the idle wake gate")
@@ -188,7 +202,7 @@ def main() -> None:
                 registry_path=Path(args.registry),
                 server_db_path=Path(args.server_db),
                 server_url=args.server,
-                send_wakes=args.send,
+                send_wakes=sends_wakes(args),
                 pm_name=args.pm_name,
             ).run()
         except RuntimeError as error:
@@ -200,7 +214,7 @@ def main() -> None:
                 registry_path=Path(args.registry),
                 server_db_path=Path(args.server_db),
                 server_url=args.server,
-                send_wakes=args.send,
+                send_wakes=sends_wakes(args),
             ).run()
         except RuntimeError as error:
             raise SystemExit(str(error)) from error
@@ -211,7 +225,7 @@ def main() -> None:
                 registry_path=Path(args.registry),
                 server_db_path=Path(args.server_db),
                 server_url=args.server,
-                send_wakes=args.send,
+                send_wakes=sends_wakes(args),
                 control_host=args.host,
                 control_port=args.port,
             ).run()
@@ -289,7 +303,7 @@ def main() -> None:
             recipients=set(args.recipients) if args.recipients else None,
             gate_interval=args.gate_interval,
             settle_seconds=args.settle_seconds,
-            send_wakes=args.send,
+            send_wakes=sends_wakes(args),
         ).run_forever()
     elif args.command == "pending":
         print(

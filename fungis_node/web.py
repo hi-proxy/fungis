@@ -117,6 +117,7 @@ def create_web_app(
     server_url: str = "http://127.0.0.1:8787",
     *,
     cmux: CmuxAdapter | None = None,
+    sends_wakes: bool = True,
 ) -> FastAPI:
     registry_path = Path(registry_path)
     cmux = cmux or CmuxAdapter()
@@ -259,8 +260,11 @@ def create_web_app(
         return FileResponse(ASSETS / "index.html")
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, object]:
+        # status만 주면 깨우기를 한 건도 안 보내는 daemon도 200을 준다. 앱은 그걸
+        # 자기 것으로 삼고 제대로 된 daemon을 띄우지 않는다. 초록불인데 아무것도
+        # 안 오는 상태가 그렇게 만들어졌다. 무엇을 보증하는지 같이 말한다.
+        return {"status": "ok", "sends_wakes": sends_wakes}
 
     app.mount("/assets", StaticFiles(directory=ASSETS), name="assets")
 
@@ -733,9 +737,11 @@ def run_web(
     server_url: str,
     host: str = "127.0.0.1",
     port: int = 8790,
+    *,
+    sends_wakes: bool = True,
 ) -> None:
     uvicorn.run(
-        create_web_app(registry_path, server_url),
+        create_web_app(registry_path, server_url, sends_wakes=sends_wakes),
         host=host,
         port=port,
         reload=False,

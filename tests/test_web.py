@@ -62,7 +62,19 @@ def test_web_index_is_served(tmp_path):
 def test_control_health_does_not_require_server_or_cmux(tmp_path):
     app = create_web_app(tmp_path / "node.db", cmux=FakeCmux())
     with TestClient(app) as client:
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json() == {"status": "ok", "sends_wakes": True}
+
+
+def test_health_admits_when_it_is_not_sending_wakes(tmp_path):
+    """200만 주는 health가 dry-run daemon을 정상으로 보이게 했다.
+
+    앱은 8790이 200이면 그 daemon을 자기 것으로 삼고 제대로 된 것을 띄우지
+    않는다. 그래서 앱을 껐다 켜도 아무것도 안 오는 상태가 유지됐다. 무엇을
+    보증하지 않는지 health가 말해야 앱이 구별할 수 있다.
+    """
+    app = create_web_app(tmp_path / "node.db", cmux=FakeCmux(), sends_wakes=False)
+    with TestClient(app) as client:
+        assert client.get("/health").json() == {"status": "ok", "sends_wakes": False}
 
 
 def test_web_agent_toggle_and_focus_use_local_cmux(tmp_path):

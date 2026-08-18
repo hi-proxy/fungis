@@ -21,7 +21,9 @@ class NodeSupervisor:
     recipients: set[str] | None = None
     gate_interval: float = 2.0
     settle_seconds: float = 5.0
-    send_wakes: bool = False
+    # 기본이 "안 보냄"이면 깜빡한 호출부가 조용히 아무것도 안 한다. 안 보내는 쪽이
+    # 말을 해야 한다.
+    send_wakes: bool = True
     registry_factory: Callable[[Path], LocalRegistry] = LocalRegistry
 
     def _log(self, kind: str, **data: object) -> None:

@@ -33,7 +33,8 @@ class DemoLauncher:
     registry_path: Path
     server_db_path: Path
     server_url: str = "http://127.0.0.1:8787"
-    send_wakes: bool = False
+    # 안 보내는 쪽이 말해야 한다. cli.add_wake_flags 참고.
+    send_wakes: bool = True
     pm_name: str = "PM"
 
     def _start_server(self) -> subprocess.Popen | None:
@@ -207,6 +208,7 @@ class DaemonLauncher(DemoLauncher):
                 self.server_url,
                 self.control_host,
                 self.control_port,
+                sends_wakes=self.send_wakes,
             )
         finally:
             stop_event.set()

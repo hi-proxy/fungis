@@ -3,6 +3,7 @@ import Foundation
 enum DaemonError: LocalizedError {
     case executableNotFound
     case startupFailed(String)
+    case foreignDaemonNotSending
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,12 @@ enum DaemonError: LocalizedError {
             "Fungis daemon did not become ready — \(reason)"
         case .startupFailed:
             "Fungis daemon did not become ready"
+        case .foreignDaemonNotSending:
+            """
+            다른 daemon이 127.0.0.1:8790을 쓰고 있고 그것은 깨우기를 보내지 않는다. \
+            메시지는 저장되지만 터미널은 깨어나지 않는다. 그 프로세스를 끝내고 앱을 \
+            다시 열어라.
+            """
         }
     }
 }
@@ -25,7 +32,16 @@ actor DaemonManager {
     private let healthURL = URL(string: "http://127.0.0.1:8790/health")!
 
     func ensureRunning() async throws {
-        if await isHealthy() { return }
+        switch await health() {
+        case .sending:
+            return
+        case .notSending:
+            // 여기서 조용히 돌아가면 앱은 깨우기를 안 보내는 daemon을 자기 것으로
+            // 삼고 아무 말도 하지 않는다. 초록불인데 메시지가 안 오는 상태다.
+            throw DaemonError.foreignDaemonNotSending
+        case .down:
+            break
+        }
         if let process, process.isRunning {
             try await waitUntilHealthy()
             return
@@ -54,20 +70,39 @@ actor DaemonManager {
             .trimmingCharacters(in: .whitespaces) ?? ""
     }
 
-    private func isHealthy() async -> Bool {
+    enum Health {
+        case down
+        case sending
+        case notSending
+    }
+
+    /// 200이라는 사실만으로는 부족하다. 깨우기를 보내는 daemon인지까지 본다.
+    /// `sends_wakes`가 아예 없으면 서버가 앱보다 낡은 것이므로 받아준다.
+    /// 칸 하나 없다고 앱이 안 뜨는 쪽이 더 나쁘다.
+    private func health() async -> Health {
         var request = URLRequest(url: healthURL)
         request.timeoutInterval = 1
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return .down }
+            let body = try? JSONDecoder().decode(HealthBody.self, from: data)
+            return (body?.sendsWakes ?? true) ? .sending : .notSending
         } catch {
-            return false
+            return .down
+        }
+    }
+
+    private struct HealthBody: Decodable {
+        let sendsWakes: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case sendsWakes = "sends_wakes"
         }
     }
 
     private func waitUntilHealthy() async throws {
         for _ in 0..<50 {
-            if await isHealthy() { return }
+            if await health() == .sending { return }
             if let process, !process.isRunning { break }
             try await Task.sleep(for: .milliseconds(200))
         }
