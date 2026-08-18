@@ -486,9 +486,10 @@ class PMClient:
         return result
 
     def update_board_node(
-        self, node_id: str, title: str | None = None, status: str | None = None
+        self, node_id: str, title: str | None = None, status: str | None = None,
+        actor: str | None = None,
     ) -> dict:
-        payload: dict[str, Any] = {}
+        payload: dict[str, Any] = {"actor": actor or self.caller_id}
         if title is not None:
             payload["title"] = title
         if status is not None:
@@ -499,8 +500,11 @@ class PMClient:
         assert isinstance(result, dict)
         return result
 
-    def delete_board_node(self, node_id: str) -> None:
-        self._request("DELETE", f"/v1/board/nodes/{urllib.parse.quote(node_id)}")
+    def delete_board_node(self, node_id: str, actor: str | None = None) -> None:
+        query = urllib.parse.urlencode({"actor": actor or self.caller_id or ""})
+        self._request(
+            "DELETE", f"/v1/board/nodes/{urllib.parse.quote(node_id)}?{query}"
+        )
 
     def link_board_nodes(
         self, node_id: str, waits_for: str, created_by: str | None = None
@@ -515,8 +519,15 @@ class PMClient:
         assert isinstance(result, dict)
         return result
 
-    def unlink_board_nodes(self, node_id: str, waits_for: str) -> None:
-        query = urllib.parse.urlencode({"node_id": node_id, "waits_for": waits_for})
+    def unlink_board_nodes(
+        self, node_id: str, waits_for: str, actor: str | None = None
+    ) -> None:
+        query = urllib.parse.urlencode(
+            {
+                "node_id": node_id, "waits_for": waits_for,
+                "actor": actor or self.caller_id or "",
+            }
+        )
         self._request("DELETE", f"/v1/board/edges?{query}")
 
     def shared(self, keys: list[str] | None = None) -> list[dict]:
@@ -684,6 +695,27 @@ class PMClient:
             f"{urllib.parse.urlencode(query)}",
         )
         assert isinstance(result, list)
+        return result
+
+    def message(self, project_seq: int) -> dict:
+        """방 안의 표시 번호로 글 하나. 번호를 알 때 앞뒤를 다 받지 않는다."""
+        query = urllib.parse.urlencode({"caller": self.caller_id or ""})
+        result = self._request(
+            "GET",
+            f"/v1/workspaces/{urllib.parse.quote(self.workspace_id)}/messages/"
+            f"{int(project_seq)}?{query}",
+        )
+        assert isinstance(result, dict)
+        return result
+
+    def members(self, workspace_id: str | None = None) -> dict:
+        """방 하나의 역할·담당자·lead."""
+        room = workspace_id or self.workspace_id
+        query = urllib.parse.urlencode({"caller": self.caller_id or ""})
+        result = self._request(
+            "GET", f"/v1/workspaces/{urllib.parse.quote(room)}/members?{query}"
+        )
+        assert isinstance(result, dict)
         return result
 
 

@@ -181,7 +181,8 @@ def test_inbox_stdout_is_one_pure_json_document_and_guidance_is_stderr(capsys):
     assert json.loads(captured.out) == {
         "messages": [{
             "seq": 25, "project": "local", "from": "CTO", "for_me": True,
-            "chain": 0, "body": "approve", "track": None, "tags": [],
+            "chain": 0, "in_reply_to": None, "body": "approve",
+            "track": None, "tags": [],
         }]
     }
     assert captured.out.count("\n") == 1

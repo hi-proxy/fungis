@@ -227,6 +227,18 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @app.post("/v1/messages", status_code=201)
     async def send_message(payload: MessageCreate) -> dict:
+        # 남의 방에 글을 남길 수는 없다. 읽기 경계와 같은 판정을 쓴다 — HQ는
+        # 소속이 아니라 lead 여부로 열리고, 그 규칙이 이미 여기 들어 있다.
+        if not db.workspace_participant(
+            workspace_id=payload.workspace_id, principal_id=payload.sender_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=db.participation_denied(
+                    workspace_id=payload.workspace_id,
+                    principal_id=payload.sender_id,
+                ),
+            )
         in_reply_to = payload.in_reply_to
         if payload.in_reply_to_project_seq is not None:
             if in_reply_to is not None:
@@ -435,8 +447,21 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         # 보드는 누구나 읽는다. 대화와 달리 상태는 가릴 것이 아니다.
         return db.board()
 
+    def guard_board_write(project_id: str, actor_id: str) -> None:
+        """보드 쓰기는 그 방 lead 와 PM 의 몫이다. 읽기는 그대로 열려 있다."""
+        denied = db.board_write_denied(project_id=project_id, actor_id=actor_id)
+        if denied:
+            raise HTTPException(status_code=403, detail=denied)
+
+    def guard_board_node_write(node_id: str, actor_id: str) -> None:
+        project_id = db.board_node_project(node_id)
+        if project_id is None:
+            raise HTTPException(status_code=404, detail="node not found")
+        guard_board_write(project_id, actor_id)
+
     @app.post("/v1/board/nodes", status_code=201)
     def create_board_node(payload: BoardNodeCreate) -> dict:
+        guard_board_write(payload.project_id, payload.created_by)
         try:
             return db.create_board_node(
                 project_id=payload.project_id, title=payload.title,
@@ -447,6 +472,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @app.patch("/v1/board/nodes/{node_id}")
     def update_board_node(node_id: str, payload: BoardNodeUpdate) -> dict:
+        guard_board_node_write(node_id, payload.actor)
         try:
             return db.update_board_node(
                 node_id, title=payload.title, status=payload.status
@@ -455,12 +481,16 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.delete("/v1/board/nodes/{node_id}", status_code=204)
-    def delete_board_node(node_id: str) -> None:
+    def delete_board_node(node_id: str, actor: str = Query(min_length=1)) -> None:
+        guard_board_node_write(node_id, actor)
         if not db.delete_board_node(node_id):
             raise HTTPException(status_code=404, detail="node not found")
 
     @app.post("/v1/board/edges", status_code=201)
     def link_board_nodes(payload: BoardEdge) -> dict:
+        # 기다리는 쪽의 방을 본다. 선행을 거는 것은 자기 일의 순서를 정하는
+        # 것이라 그 판단은 기다리는 방의 몫이다.
+        guard_board_node_write(payload.node_id, payload.created_by)
         try:
             db.link_board_nodes(
                 node_id=payload.node_id, waits_for=payload.waits_for,
@@ -473,7 +503,11 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         return {"node_id": payload.node_id, "waits_for": payload.waits_for}
 
     @app.delete("/v1/board/edges", status_code=204)
-    def unlink_board_nodes(node_id: str = Query(...), waits_for: str = Query(...)) -> None:
+    def unlink_board_nodes(
+        node_id: str = Query(...), waits_for: str = Query(...),
+        actor: str = Query(min_length=1),
+    ) -> None:
+        guard_board_node_write(node_id, actor)
         if not db.unlink_board_nodes(node_id=node_id, waits_for=waits_for):
             raise HTTPException(status_code=404, detail="link not found")
 
@@ -520,7 +554,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             workspace_id=workspace_id, principal_id=caller
         ):
             raise HTTPException(
-                status_code=403, detail="not a participant of this workspace"
+                status_code=403,
+                detail=db.participation_denied(
+                    workspace_id=workspace_id, principal_id=caller
+                ),
             )
         if after is not None and before is not None:
             raise HTTPException(status_code=422, detail="after and before are mutually exclusive")
@@ -537,6 +574,47 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             if after is None:
                 after = 0
         return db.workspace_timeline(workspace_id, limit, after, before)
+
+    @app.get("/v1/workspaces/{workspace_id}/messages/{project_seq}")
+    def workspace_message(
+        workspace_id: str, project_seq: int, caller: str = Query(...)
+    ) -> dict:
+        # 글 하나도 열람 경계를 지난다. 한 개짜리 창구를 열어 두면 그것이 곧
+        # 우회로가 된다.
+        if not db.workspace_participant(
+            workspace_id=workspace_id, principal_id=caller
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=db.participation_denied(
+                    workspace_id=workspace_id, principal_id=caller
+                ),
+            )
+        message = db.workspace_message(
+            workspace_id=workspace_id, project_seq=project_seq
+        )
+        if message is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{project_seq} 번 글이 이 방에 없다. fungis history 로 번호를 확인하라.",
+            )
+        return message
+
+    @app.get("/v1/workspaces/{workspace_id}/members")
+    def workspace_members(workspace_id: str, caller: str = Query(...)) -> dict:
+        # 자기 방 명단은 누구나 본다. 남의 방 명단은 lead 만 본다 — 방을 건너
+        # 일을 거는 것이 lead 의 일이고, 그 일에는 상대 이름이 필요하다.
+        if not db.workspace_participant(
+            workspace_id=workspace_id, principal_id=caller
+        ) and not db.is_any_lead(caller):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f'"{db.project_name(workspace_id)}" 명단은 그 방 사람이나 '
+                    "lead 만 본다. 네 방 lead 를 통하거나 PM 에게 요청하라."
+                ),
+            )
+        return db.members(workspace_id)
 
     @app.get("/v1/workspaces/{workspace_id}/attention")
     def workspace_attention(workspace_id: str) -> list[dict]:

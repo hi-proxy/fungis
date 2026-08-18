@@ -391,6 +391,9 @@ def emit_inbox(messages: list[dict]) -> None:
                 "for_me": not message.get("is_reference"),
                 # PM이 마지막으로 말한 뒤 에이전트끼리 오간 횟수.
                 "chain": int(message.get("agent_chain") or 0),
+                # 무엇에 대한 답인지. 이게 빠지면 에이전트는 답글을 걸 수는
+                # 있는데 받은 글이 무엇에 대한 답인지 못 본다.
+                "in_reply_to": message.get("in_reply_to_project_seq"),
                 "body": message["body"],
                 "track": message.get("track"),
                 "tags": message.get("tags", []),

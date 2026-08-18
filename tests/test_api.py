@@ -3,6 +3,27 @@ from fastapi.testclient import TestClient
 from fungis_server.app import create_app
 
 
+def join(client, workspace_id, agent_id, *, assigned_by="pm", lead=False):
+    """그 방에 역할 하나를 만들어 앉힌다.
+
+    방에 글을 남기려면 그 방 소속이어야 한다. 소속은 별도 명부가 아니라
+    활성 배정에서 파생되므로, 테스트도 실제와 같은 방법으로 들어간다.
+    """
+    role = client.post(
+        f"/v1/workspaces/{workspace_id}/roles", json={"name": f"{agent_id}-role"}
+    ).json()
+    if lead:
+        client.put(f"/v1/roles/{role['id']}/lead", json={"is_lead": True})
+    client.put(
+        f"/v1/roles/{role['id']}/assignment",
+        json={
+            "agent_id": agent_id, "assigned_by": assigned_by,
+            "send_onboarding": False,
+        },
+    )
+    return role
+
+
 def test_message_flow(tmp_path):
     app = create_app(tmp_path / "api.db")
     with TestClient(app) as client:
@@ -160,6 +181,7 @@ def test_pm_attention_is_prioritized_and_resolved_by_linked_reply(tmp_path):
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+        join(client, "local", "agent")
         low = client.post(
             "/v1/messages",
             json={
@@ -207,6 +229,7 @@ def test_message_context_is_indexed_and_inherited_by_replies(tmp_path):
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+        join(client, "local", "agent")
         parent = client.post(
             "/v1/messages",
             json={
@@ -333,6 +356,8 @@ def test_two_pms_share_workspace_timeline_and_either_can_resolve_attention(tmp_p
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+        client.post("/v1/projects", json={"id": "shared-room", "name": "shared room"})
+        join(client, "shared-room", "agent-a", assigned_by="pm-a")
         client.post(
             "/v1/messages",
             json={
@@ -387,6 +412,7 @@ def test_multiple_recipients_and_pm_reference_are_distinct(tmp_path):
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+        join(client, "local", "agent-a")
         message = client.post(
             "/v1/messages",
             json={
@@ -423,6 +449,7 @@ def test_reference_is_delivered_but_marked_as_listen_only(tmp_path):
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+        join(client, "local", "manager")
         client.post(
             "/v1/messages",
             json={
@@ -459,6 +486,9 @@ def test_agent_chain_counts_only_since_the_last_human_message(tmp_path):
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+
+        for agent_id in ("a", "b"):
+            join(client, "local", agent_id)
 
         def post(sender: str, recipients: list[str], body: str) -> None:
             client.post(
@@ -672,6 +702,7 @@ def test_project_history_supports_compaction_restore_after_sequence(tmp_path):
                 f"/v1/principals/{principal_id}",
                 json={"id": principal_id, "kind": kind, "display_name": principal_id},
             )
+        join(client, "local", "agent")
         sequences = []
         for body, sender, recipient in (
             ("first", "pm", "agent"),
@@ -934,12 +965,285 @@ def test_board_tracks_nodes_and_links_over_http(tmp_path):
             raise AssertionError("노드가 보드에 없다")
 
         assert state_of(second["id"]) == "waiting"
-        client.patch(f"/v1/board/nodes/{first['id']}", json={"status": "done"})
+        client.patch(
+            f"/v1/board/nodes/{first['id']}",
+            json={"status": "done", "actor": "pm"},
+        )
         assert state_of(second["id"]) == "todo"
 
-        assert client.delete(f"/v1/board/nodes/{first['id']}").status_code == 204
+        assert client.delete(
+            f"/v1/board/nodes/{first['id']}", params={"actor": "pm"}
+        ).status_code == 204
         remaining = [
             node["id"] for track in client.get("/v1/board").json()
             for node in track["nodes"]
         ]
         assert remaining == [second["id"]]
+
+
+def convene(client, name, prefix_agent="lead"):
+    """방 하나를 만들고 lead 를 앉힌 뒤 HQ 에 붙인다."""
+    hq = client.get("/v1/hq").json()
+    client.post("/v1/projects", json={"id": name, "name": name})
+    role = join(client, name, prefix_agent, lead=True)
+    client.put(f"/v1/projects/{name}/board-link", json={"hq_id": hq["id"]})
+    return hq, role
+
+
+def test_a_message_with_no_recipient_is_kept_and_read_back_as_history(tmp_path):
+    """수신자 0인 글도 방에 남는다. 배달만 없다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        join(client, "local", "agent")
+        created = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "agent",
+                "recipient_ids": [], "body": "주소 없는 글",
+            },
+        )
+        assert created.status_code == 201
+        assert created.json()["recipient_ids"] == []
+        # 아무도 깨우지 않는다.
+        assert client.get("/v1/inbox/state/agent").json() == {
+            "received_seq": 0, "processed_seq": 0, "pending_count": 0
+        }
+        assert client.get(
+            "/v1/messages", params={"recipient": "agent", "after": 0}
+        ).json() == []
+        # 그래도 history 로 읽힌다.
+        timeline = client.get(
+            "/v1/workspaces/local/timeline", params={"caller": "agent"}
+        ).json()
+        assert [item["body"] for item in timeline] == ["주소 없는 글"]
+        assert timeline[0]["recipients"] == []
+        # 웹소켓을 새로 붙여도 밀린 이벤트가 없다.
+        with client.websocket_connect("/v1/events/agent?after=0") as websocket:
+            websocket.send_text("ping")
+
+
+def test_hq_addresses_a_room_by_name_and_reaches_its_lead(tmp_path):
+    """HQ 에서 수신자는 방 이름으로 지목한다. 서버가 그 방 lead 로 푼다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("lead", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        hq, _ = convene(client, "archivia")
+        message = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": hq["id"], "sender_id": "pm",
+                "recipient_ids": ["ARCH"], "body": "표지 언제 끝나나",
+            },
+        )
+        assert message.status_code == 201
+        assert message.json()["recipient_ids"] == ["lead"]
+
+
+def test_one_message_can_be_pulled_out_by_its_room_number(tmp_path):
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("agent", "agent"), ("outsider", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        join(client, "local", "agent")
+        for body in ("첫 글", "둘째 글"):
+            client.post(
+                "/v1/messages",
+                json={
+                    "workspace_id": "local", "sender_id": "pm",
+                    "recipient_ids": ["agent"], "body": body,
+                },
+            )
+        found = client.get(
+            "/v1/workspaces/local/messages/2", params={"caller": "agent"}
+        )
+        assert found.status_code == 200
+        assert found.json()["body"] == "둘째 글"
+        assert found.json()["project_seq"] == 2
+        # 없는 번호는 다음 행동을 함께 준다.
+        missing = client.get(
+            "/v1/workspaces/local/messages/99", params={"caller": "agent"}
+        )
+        assert missing.status_code == 404
+        assert "fungis history" in missing.json()["detail"]
+        # 열람 경계를 반드시 지난다.
+        denied = client.get(
+            "/v1/workspaces/local/messages/2", params={"caller": "outsider"}
+        )
+        assert denied.status_code == 403
+
+
+def test_writing_into_someone_elses_room_is_refused_with_a_next_step(tmp_path):
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "mei", "name": "mei"})
+        join(client, "local", "agent")
+        denied = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "mei", "sender_id": "agent",
+                "recipient_ids": ["pm"], "body": "남의 방",
+            },
+        )
+        assert denied.status_code == 403
+        detail = denied.json()["detail"]
+        assert '"mei" 소속이 아니다' in detail
+        # 다음 행동: 어디에 속해 있는지 말해 준다.
+        assert "Local" in detail
+
+
+def test_only_a_lead_reads_another_rooms_member_list(tmp_path):
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("lead", "agent"), ("worker", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        convene(client, "archivia")
+        join(client, "local", "worker")
+        # 자기 방은 누구나 본다.
+        mine = client.get(
+            "/v1/workspaces/local/members", params={"caller": "worker"}
+        )
+        assert mine.status_code == 200
+        assert [role["name"] for role in mine.json()["roles"]] == ["worker-role"]
+        # 남의 방은 lead 만 본다.
+        assert client.get(
+            "/v1/workspaces/archivia/members", params={"caller": "lead"}
+        ).json()["lead"]["agent_id"] == "lead"
+        denied = client.get(
+            "/v1/workspaces/archivia/members", params={"caller": "worker"}
+        )
+        assert denied.status_code == 403
+        assert "PM" in denied.json()["detail"]
+        assert client.get(
+            "/v1/workspaces/archivia/members", params={"caller": "pm"}
+        ).status_code == 200
+
+
+def test_the_board_is_read_by_everyone_but_written_by_the_lead(tmp_path):
+    """읽기는 열려 있고 쓰기만 그 방 lead 와 PM 의 몫이다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("lead", "agent"), ("worker", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        convene(client, "archivia")
+        join(client, "archivia", "worker")
+
+        # 읽기는 그대로 열려 있다.
+        assert client.get("/v1/board").status_code == 200
+
+        denied = client.post(
+            "/v1/board/nodes",
+            json={
+                "project_id": "archivia", "title": "표지 정리",
+                "created_by": "worker",
+            },
+        )
+        assert denied.status_code == 403
+        assert "lead 는 lead 다" in denied.json()["detail"]
+
+        node = client.post(
+            "/v1/board/nodes",
+            json={
+                "project_id": "archivia", "title": "표지 정리",
+                "created_by": "lead",
+            },
+        ).json()
+        assert client.patch(
+            f"/v1/board/nodes/{node['id']}",
+            json={"status": "active", "actor": "worker"},
+        ).status_code == 403
+        assert client.patch(
+            f"/v1/board/nodes/{node['id']}",
+            json={"status": "active", "actor": "lead"},
+        ).status_code == 200
+        assert client.delete(
+            f"/v1/board/nodes/{node['id']}", params={"actor": "worker"}
+        ).status_code == 403
+        assert client.delete(
+            f"/v1/board/nodes/{node['id']}", params={"actor": "pm"}
+        ).status_code == 204
+
+
+def test_the_board_tells_you_to_ask_the_pm_when_a_room_has_no_lead(tmp_path):
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("worker", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        hq = client.get("/v1/hq").json()
+        client.post("/v1/projects", json={"id": "archivia", "name": "archivia"})
+        role = join(client, "archivia", "worker", lead=True)
+        client.put("/v1/projects/archivia/board-link", json={"hq_id": hq["id"]})
+        # lead 자리를 비운다.
+        client.put(f"/v1/roles/{role['id']}/lead", json={"is_lead": False})
+        denied = client.post(
+            "/v1/board/nodes",
+            json={
+                "project_id": "archivia", "title": "표지 정리",
+                "created_by": "worker",
+            },
+        )
+        assert denied.status_code == 403
+        assert "lead 가 없다" in denied.json()["detail"]
+        assert "PM" in denied.json()["detail"]
+
+
+def test_a_reply_carries_what_it_answers_to_the_reader(tmp_path):
+    """받은 글이 무엇에 대한 답인지 읽는 쪽에 실린다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        join(client, "local", "agent")
+        asked = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "agent",
+                "recipient_ids": ["pm"], "body": "물어본다",
+            },
+        ).json()
+        client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "pm",
+                "recipient_ids": ["agent"], "body": "답한다",
+                "in_reply_to_project_seq": asked["project_seq"],
+            },
+        )
+        delivered = client.get(
+            "/v1/messages", params={"recipient": "agent", "after": 0}
+        ).json()
+        assert delivered[-1]["in_reply_to_project_seq"] == asked["project_seq"]
