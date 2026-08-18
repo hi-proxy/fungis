@@ -248,7 +248,7 @@ def test_message_context_is_indexed_and_inherited_by_replies(tmp_path):
         assert detached["track"] is None
         assert detached["tags"] == []
 
-        timeline = client.get("/v1/workspaces/local/timeline").json()
+        timeline = client.get("/v1/workspaces/local/timeline", params={"caller": "pm"}).json()
         assert timeline[0]["tags"] == ["ticket/ARC-42", "review"]
         assert timeline[1]["track"] == "branch/feature-a"
 
@@ -354,7 +354,7 @@ def test_two_pms_share_workspace_timeline_and_either_can_resolve_attention(tmp_p
             },
         ).json()
         timeline = client.get(
-            "/v1/workspaces/shared-room/timeline"
+            "/v1/workspaces/shared-room/timeline", params={"caller": "pm-a"}
         ).json()
         assert [item["body"] for item in timeline] == [
             "from first PM", "need approval"
@@ -399,7 +399,7 @@ def test_multiple_recipients_and_pm_reference_are_distinct(tmp_path):
         ).json()
         assert message["recipient_ids"] == ["agent-a", "agent-b"]
         assert message["reference_ids"] == ["pm"]
-        timeline = client.get("/v1/workspaces/local/timeline").json()
+        timeline = client.get("/v1/workspaces/local/timeline", params={"caller": "pm"}).json()
         assert [item["recipient_id"] for item in timeline[0]["recipients"]] == [
             "agent-a", "agent-b"
         ]
@@ -444,7 +444,7 @@ def test_reference_is_delivered_but_marked_as_listen_only(tmp_path):
         ).json()
         assert to_pm[0]["is_reference"] == 0
 
-        timeline = client.get("/v1/workspaces/local/timeline").json()
+        timeline = client.get("/v1/workspaces/local/timeline", params={"caller": "pm"}).json()
         assert [item["recipient_id"] for item in timeline[0]["recipients"]] == ["pm"]
 
 
@@ -686,22 +686,22 @@ def test_project_history_supports_compaction_restore_after_sequence(tmp_path):
                 },
             ).json()["seq"])
         latest = client.get(
-            "/v1/workspaces/local/timeline", params={"limit": 2}
+            "/v1/workspaces/local/timeline", params={"caller": "pm", "limit": 2}
         ).json()
         assert [item["body"] for item in latest] == ["second", "third"]
         after = client.get(
             "/v1/workspaces/local/timeline",
-            params={"limit": 20, "after": sequences[0]},
+            params={"caller": "pm", "limit": 20, "after": sequences[0]},
         ).json()
         assert [item["body"] for item in after] == ["second", "third"]
         before = client.get(
             "/v1/workspaces/local/timeline",
-            params={"limit": 2, "before": sequences[-1]},
+            params={"caller": "pm", "limit": 2, "before": sequences[-1]},
         ).json()
         assert [item["body"] for item in before] == ["first", "second"]
         assert client.get(
             "/v1/workspaces/local/timeline",
-            params={"after": sequences[0], "before": sequences[-1]},
+            params={"caller": "pm", "after": sequences[0], "before": sequences[-1]},
         ).status_code == 422
         assert client.post(
             "/v1/messages",
@@ -807,7 +807,139 @@ def test_archiving_a_project_keeps_messages_and_ends_assignments(tmp_path):
         # 목록에서 빠진다.
         assert project["id"] not in [p["id"] for p in client.get("/v1/projects").json()]
         # 메시지는 남는다.
-        timeline = client.get(f"/v1/workspaces/{project['id']}/timeline").json()
+        timeline = client.get(f"/v1/workspaces/{project['id']}/timeline", params={"caller": "pm"}).json()
         assert [item["body"] for item in timeline] == ["남아야 한다"]
         # 두 번 닫으면 404.
         assert client.delete(f"/v1/projects/{project['id']}").status_code == 404
+
+
+def test_workspace_timeline_is_readable_only_by_participants(tmp_path):
+    """대화는 그 방 사람만 읽는다. 명단은 아니다.
+
+    지키려는 것이 대화라서 init(명단)은 막지 않는다. 막으면 들어가려는
+    에이전트가 들어갈 수 없다.
+
+    신원은 자기 신고라 작정하면 우회된다. 여기서 막는 것은 실수다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("inside", "agent"), ("outside", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "hq", "name": "hq"})
+        role = client.post(
+            "/v1/workspaces/hq/roles", json={"name": "lead"}
+        ).json()
+        client.put(
+            f"/v1/roles/{role['id']}/assignment",
+            json={"agent_id": "inside", "assigned_by": "pm", "send_onboarding": False},
+        )
+        client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "hq", "sender_id": "pm",
+                "recipient_ids": ["inside"], "body": "roadmap",
+            },
+        )
+
+        def read(caller):
+            return client.get(
+                "/v1/workspaces/hq/timeline", params={"caller": caller}
+            )
+
+        assert [m["body"] for m in read("inside").json()] == ["roadmap"]
+        assert [m["body"] for m in read("pm").json()] == ["roadmap"]
+        assert read("outside").status_code == 403
+        assert read("nobody").status_code == 403
+        # 호출자를 안 실으면 통과가 아니라 거절이다. 빠뜨림이 우회로가 되면 안 된다.
+        assert client.get("/v1/workspaces/hq/timeline").status_code == 422
+
+        # 명단은 그대로 열려 있다.
+        assert client.get(
+            "/v1/projects/hq/bootstrap",
+            params={"agent_id": "outside", "pm_id": "pm"},
+        ).status_code == 200
+
+
+def test_board_tracks_nodes_and_links_over_http(tmp_path):
+    """보드 한 바퀴. 트랙에 노드를 올리고 이어서 대기를 읽는다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("lead", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        # HQ는 만드는 것이 아니라 처음부터 있다.
+        hq = client.get("/v1/hq").json()
+
+        for name in ("archivia", "fungis"):
+            client.post("/v1/projects", json={"id": name, "name": name})
+            role = client.post(
+                f"/v1/workspaces/{name}/roles", json={"name": f"{name}-lead"}
+            ).json()
+            # lead 없이 붙으려 하면 거절한다.
+            assert client.put(
+                f"/v1/projects/{name}/board-link", json={"hq_id": hq["id"]}
+            ).status_code == 409
+            client.put(f"/v1/roles/{role['id']}/lead", json={"is_lead": True})
+            client.put(
+                f"/v1/roles/{role['id']}/assignment",
+                json={
+                    "agent_id": "lead", "assigned_by": "pm", "send_onboarding": False,
+                },
+            )
+            assert client.put(
+                f"/v1/projects/{name}/board-link", json={"hq_id": hq["id"]}
+            ).status_code == 200
+
+        assert client.get("/v1/projects/archivia/lead").json()["agent_id"] == "lead"
+
+        first = client.post(
+            "/v1/board/nodes",
+            json={
+                "project_id": "archivia", "title": "선행작업",
+                "created_by": "pm", "status": "active",
+            },
+        ).json()
+        second = client.post(
+            "/v1/board/nodes",
+            json={"project_id": "fungis", "title": "2단계", "created_by": "lead"},
+        ).json()
+        assert client.post(
+            "/v1/board/edges",
+            json={
+                "node_id": second["id"], "waits_for": first["id"],
+                "created_by": "lead",
+            },
+        ).status_code == 201
+        # 되돌려 이으면 순환이라 거절한다.
+        assert client.post(
+            "/v1/board/edges",
+            json={
+                "node_id": first["id"], "waits_for": second["id"],
+                "created_by": "lead",
+            },
+        ).status_code == 409
+
+        def state_of(node_id):
+            for track in client.get("/v1/board").json():
+                for node in track["nodes"]:
+                    if node["id"] == node_id:
+                        return node["state"]
+            raise AssertionError("노드가 보드에 없다")
+
+        assert state_of(second["id"]) == "waiting"
+        client.patch(f"/v1/board/nodes/{first['id']}", json={"status": "done"})
+        assert state_of(second["id"]) == "todo"
+
+        assert client.delete(f"/v1/board/nodes/{first['id']}").status_code == 204
+        remaining = [
+            node["id"] for track in client.get("/v1/board").json()
+            for node in track["nodes"]
+        ]
+        assert remaining == [second["id"]]

@@ -34,6 +34,71 @@ struct FungisAPI: Sendable {
         try await request("api/state?project_id=\(encoded(projectID))")
     }
 
+    // MARK: 상황보드
+
+    func board() async throws -> BoardSnapshot {
+        try await request("api/board")
+    }
+
+    func connectTrack(projectID: String, hqID: String) async throws {
+        struct Payload: Encodable { let hq_id: String }
+        let _: EmptyResponse = try await request(
+            "api/board/tracks/\(encoded(projectID))", method: "PUT",
+            body: Payload(hq_id: hqID)
+        )
+    }
+
+    func disconnectTrack(projectID: String) async throws {
+        let _: EmptyResponse = try await request(
+            "api/board/tracks/\(encoded(projectID))", method: "DELETE"
+        )
+    }
+
+    func createBoardNode(projectID: String, title: String) async throws {
+        struct Payload: Encodable { let project_id: String; let title: String }
+        let _: EmptyResponse = try await request(
+            "api/board/nodes", method: "POST",
+            body: Payload(project_id: projectID, title: title)
+        )
+    }
+
+    func updateBoardNode(nodeID: String, title: String? = nil, status: String? = nil) async throws {
+        struct Payload: Encodable { let title: String?; let status: String? }
+        let _: EmptyResponse = try await request(
+            "api/board/nodes/\(encoded(nodeID))", method: "PATCH",
+            body: Payload(title: title, status: status)
+        )
+    }
+
+    func deleteBoardNode(nodeID: String) async throws {
+        let _: EmptyResponse = try await request(
+            "api/board/nodes/\(encoded(nodeID))", method: "DELETE"
+        )
+    }
+
+    func linkBoardNodes(nodeID: String, waitsFor: String) async throws {
+        struct Payload: Encodable { let node_id: String; let waits_for: String }
+        let _: EmptyResponse = try await request(
+            "api/board/edges", method: "POST",
+            body: Payload(node_id: nodeID, waits_for: waitsFor)
+        )
+    }
+
+    func unlinkBoardNodes(nodeID: String, waitsFor: String) async throws {
+        let _: EmptyResponse = try await request(
+            "api/board/edges?node_id=\(encoded(nodeID))&waits_for=\(encoded(waitsFor))",
+            method: "DELETE"
+        )
+    }
+
+    func setRoleLead(roleID: String, isLead: Bool) async throws {
+        struct Payload: Encodable { let is_lead: Bool }
+        let _: EmptyResponse = try await request(
+            "api/roles/\(encoded(roleID))/lead", method: "PUT",
+            body: Payload(is_lead: isLead)
+        )
+    }
+
     func snapshots(projectID: String = "local") -> AsyncThrowingStream<FungisSnapshot, Error> {
         AsyncThrowingStream { continuation in
             var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!

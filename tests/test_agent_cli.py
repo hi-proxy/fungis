@@ -3,7 +3,8 @@ import json
 import pytest
 
 from fungis_node.agent_cli import (
-    active_project, compact_history, emit_inbox, format_bootstrap, load_config,
+    active_project, compact_board, compact_history, emit_inbox, format_bootstrap,
+    load_config,
     parser, stored_echo,
     write_error_message,
 )
@@ -293,3 +294,46 @@ def test_inbox_is_quiet_when_one_room(capsys):
          "sender_name": "PM", "body": "a", "track": None, "tags": []},
     ])
     assert "--project" not in capsys.readouterr().err
+
+
+def test_compact_board_carries_the_command_to_ask_the_blocking_project():
+    """막힌 노드는 무엇을 기다리는지와 물어보는 법을 같이 들고 온다.
+
+    "archivia를 기다림"까지만 주면 에이전트가 누구에게 어떻게 물을지 한 번
+    더 생각해야 한다. 명령이 실려 오면 생각할 것이 없다.
+    """
+    board = [
+        {
+            "project_id": "archivia", "project_name": "archivia",
+            "nodes": [{
+                "id": "n1", "title": "선행작업", "status": "active",
+                "state": "active", "waits_for": [], "blocked_by": [],
+            }],
+        },
+        {
+            "project_id": "fungis", "project_name": "fungis",
+            "nodes": [
+                {
+                    "id": "n2", "title": "2단계", "status": "todo",
+                    "state": "waiting", "waits_for": ["n1"], "blocked_by": ["n1"],
+                },
+                {
+                    "id": "n3", "title": "1단계 후속", "status": "active",
+                    "state": "active", "waits_for": [], "blocked_by": [],
+                },
+            ],
+        },
+    ]
+    compact = compact_board(board)["board"]
+    fungis = next(track for track in compact if track["project"] == "fungis")
+    blocked = next(node for node in fungis["nodes"] if node["id"] == "n2")
+    assert blocked["state"] == "waiting"
+    assert blocked["waiting_for"] == [
+        {
+            "project": "archivia", "title": "선행작업", "status": "active",
+            "ask": 'fungis ask archivia "..."',
+        }
+    ]
+    # 안 막힌 노드에는 붙이지 않는다. 없는 자리에 명령이 있으면 부른다.
+    running = next(node for node in fungis["nodes"] if node["id"] == "n3")
+    assert "waiting_for" not in running

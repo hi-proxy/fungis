@@ -174,9 +174,14 @@ struct ContentView: View {
 
     private var filteredProjects: [FungisProject] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return model.snapshot.projects }
-        return model.snapshot.projects.filter {
-            $0.name.localizedCaseInsensitiveContains(query)
+        let projects = query.isEmpty
+            ? model.snapshot.projects
+            : model.snapshot.projects.filter {
+                $0.name.localizedCaseInsensitiveContains(query)
+            }
+        // HQ가 맨 위에 온다. 전체를 조망하는 자리라 방 하나로 섞이면 묻힌다.
+        return projects.sorted { first, second in
+            first.isHQ && !second.isHQ
         }
     }
 

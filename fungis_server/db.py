@@ -147,6 +147,10 @@ CREATE TABLE IF NOT EXISTS workspace_roles (
     workspace_id TEXT NOT NULL,
     name TEXT NOT NULL,
     onboarding_prompt TEXT NOT NULL DEFAULT '',
+    -- 그 방을 대표해 다른 방의 물음을 받는 자리. 방마다 하나다. 둘을
+    -- 허용하면 "누구에게 물어야 하나"가 그대로 남는데, lead는 바로 그
+    -- 물음을 없애려고 있다.
+    is_lead INTEGER NOT NULL DEFAULT 0,
     avatar BLOB,
     avatar_media_type TEXT,
     avatar_updated_at TEXT,
@@ -202,6 +206,38 @@ CREATE TABLE IF NOT EXISTS shared_values (
     updated_by TEXT NOT NULL REFERENCES principals(id),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (workspace_id, key)
+);
+
+-- 상황보드. HQ 하나에 붙는다.
+--
+-- 노드는 각 프로젝트가 자기 트랙에 올린다. 간선은 노드 사이를 잇는다.
+-- 올리는 것도 잇는 것도 PM과 lead 모두 할 수 있어서 승인 자리가 없다.
+--
+-- 보드가 하나뿐이라 노드에 보드 id를 두지 않는다. 둘째가 생기면 그때 판다.
+CREATE TABLE IF NOT EXISTS board_nodes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    -- 대기는 여기 없다. 선행이 안 끝났으면 대기로 읽는 것이지 사람이
+    -- 정하는 값이 아니다. 저장하면 선행과 어긋난다.
+    status TEXT NOT NULL DEFAULT 'todo'
+        CHECK (status IN ('todo', 'active', 'done')),
+    created_by TEXT NOT NULL REFERENCES principals(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS board_nodes_project ON board_nodes(project_id);
+
+-- 선행은 기다리는 쪽의 것이다. 그래서 간선을 긋는 것은 남의 노드가 아니라
+-- 자기 노드를 고치는 일이 된다. 간선에 주인을 따로 정할 필요가 없다.
+CREATE TABLE IF NOT EXISTS board_edges (
+    node_id TEXT NOT NULL REFERENCES board_nodes(id) ON DELETE CASCADE,
+    waits_for TEXT NOT NULL REFERENCES board_nodes(id) ON DELETE CASCADE,
+    created_by TEXT NOT NULL REFERENCES principals(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (node_id, waits_for),
+    CHECK (node_id <> waits_for)
 );
 
 CREATE TABLE IF NOT EXISTS work_items (
@@ -312,8 +348,42 @@ class FungisDB:
             """CREATE UNIQUE INDEX IF NOT EXISTS one_active_role_per_agent_per_project
                ON role_assignments(workspace_id, agent_id) WHERE ended_at IS NULL"""
         )
+        if "is_lead" not in role_columns:
+            self._connection.execute(
+                "ALTER TABLE workspace_roles ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"
+            )
+        self._connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS one_lead_per_project
+               ON workspace_roles(workspace_id)
+               WHERE is_lead = 1 AND deleted_at IS NULL"""
+        )
+        project_columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(projects)")
+        }
+        if "kind" not in project_columns:
+            self._connection.execute(
+                "ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'project'"
+            )
+        if "parent_id" not in project_columns:
+            # 보드에 연결된 프로젝트만 부모를 갖는다. 연결은 명시적인 일이라
+            # 안 붙은 프로젝트는 NULL로 남는다.
+            self._connection.execute("ALTER TABLE projects ADD COLUMN parent_id TEXT")
+        # 닫힌 HQ가 자리를 붙들면 새 HQ를 영영 못 만든다. 이 코드의 다른
+        # "하나만" 인덱스 중 삭제 술어를 가진 것은 unique_active_role_name
+        # 하나뿐인데, 여기서는 그쪽을 본보기로 삼는다.
+        self._connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS one_live_hq
+               ON projects(kind) WHERE kind = 'hq' AND archived_at IS NULL"""
+        )
         self._connection.execute(
             "INSERT OR IGNORE INTO projects(id, name) VALUES ('local', 'Local')"
+        )
+        # HQ는 만드는 것이 아니라 있는 것이다. 만들게 하면 "아직 없음" 상태가
+        # 생기고, 그 상태를 화면과 API가 각각 다뤄야 한다. 처음부터 두면
+        # 그 갈래가 통째로 사라진다.
+        self._connection.execute(
+            "INSERT OR IGNORE INTO projects(id, name, kind) VALUES ('hq', 'HQ', 'hq')"
         )
         for table in ("workspace_roles", "messages", "shared_values", "work_items"):
             rows = self._connection.execute(
@@ -460,6 +530,216 @@ class FungisDB:
             ).fetchone()
         return dict(row) if row else None
 
+    def workspace_participant(self, *, workspace_id: str, principal_id: str) -> bool:
+        """이 사람이 그 방의 대화를 읽어도 되나.
+
+        지키려는 것은 대화지 명단이 아니다. 명단은 init으로 볼 수 있다 —
+        들어가려면 이미 안에 있어야 하는 꼴이 되면 아무도 못 들어온다.
+
+        참가 = 역할 보유로 본다. 지금 모델에서 방에 있다는 것을 말하는 다른
+        수단이 없다. 사람은 통과시킨다. PM은 어느 방에도 역할로 적혀 있지
+        않지만 모든 방을 본다.
+
+        여기서 막는 것은 실수다. 신원은 자기 신고라 작정하면 우회된다.
+        그건 서버가 이 기계를 벗어날 때 인증으로 풀 일이고, 그때 이 검사는
+        뜯지 않고 그 위에 얹힌다.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT kind FROM principals WHERE id = ?", (principal_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if row["kind"] == "human":
+                return True
+            return self._connection.execute(
+                """SELECT 1 FROM role_assignments
+                   WHERE workspace_id = ? AND agent_id = ? AND ended_at IS NULL
+                   LIMIT 1""",
+                (workspace_id, principal_id),
+            ).fetchone() is not None
+
+    # ---- 상황보드 ----------------------------------------------------------
+
+    def board(self) -> list[dict[str, Any]]:
+        """트랙 단위로 묶어 돌려준다. 연결된 프로젝트만 트랙이 된다.
+
+        노드가 없는 트랙도 돌려준다. 연결은 했는데 아직 아무것도 안 올린
+        상태가 보여야 PM이 비었다는 걸 안다.
+        """
+        with self._lock:
+            tracks = self._connection.execute(
+                """SELECT id, name FROM projects
+                   WHERE parent_id IS NOT NULL AND archived_at IS NULL
+                   ORDER BY name"""
+            ).fetchall()
+            nodes = self._connection.execute(
+                "SELECT * FROM board_nodes ORDER BY created_at, id"
+            ).fetchall()
+            edges = self._connection.execute(
+                "SELECT node_id, waits_for FROM board_edges"
+            ).fetchall()
+        done = {row["id"] for row in nodes if row["status"] == "done"}
+        waits: dict[str, list[str]] = {}
+        for edge in edges:
+            waits.setdefault(edge["node_id"], []).append(edge["waits_for"])
+        by_track: dict[str, list[dict[str, Any]]] = {}
+        for row in nodes:
+            node = dict(row)
+            node["waits_for"] = sorted(waits.get(node["id"], []))
+            blocked = [item for item in node["waits_for"] if item not in done]
+            # 대기는 저장하지 않고 여기서 읽는다. 안 시작했는데 선행이 남아
+            # 있으면 못 하는 것이지 안 하는 것이 아니다.
+            node["blocked_by"] = sorted(blocked)
+            node["state"] = (
+                "waiting" if node["status"] == "todo" and blocked else node["status"]
+            )
+            by_track.setdefault(node["project_id"], []).append(node)
+        return [
+            {
+                "project_id": track["id"],
+                "project_name": track["name"],
+                "nodes": by_track.get(track["id"], []),
+            }
+            for track in tracks
+        ]
+
+    def board_candidates(self) -> list[dict[str, Any]]:
+        """소집 화면이 한 번에 필요한 것. 목록·연결 여부·lead·배정된 역할.
+
+        PM은 "누구를 부를까"를 고르는 자리에서 "부를 수 있나"까지 같이 봐야
+        한다. 두 번 부르게 하면 화면이 두 상태를 조립해야 하고, 그 사이에
+        어긋난다.
+        """
+        with self._lock:
+            projects = self._connection.execute(
+                """SELECT id, name, parent_id FROM projects
+                   WHERE archived_at IS NULL AND kind != 'hq'
+                   ORDER BY created_at, name"""
+            ).fetchall()
+            roles = self._connection.execute(
+                """SELECT r.workspace_id, r.id, r.name, r.is_lead,
+                          a.agent_id, p.display_name AS agent_name
+                   FROM workspace_roles r
+                   LEFT JOIN role_assignments a
+                     ON a.role_id = r.id AND a.ended_at IS NULL
+                   LEFT JOIN principals p ON p.id = a.agent_id
+                   WHERE r.deleted_at IS NULL
+                   ORDER BY r.name"""
+            ).fetchall()
+        by_project: dict[str, list[dict[str, Any]]] = {}
+        for row in roles:
+            item = dict(row)
+            item["is_lead"] = bool(item["is_lead"])
+            by_project.setdefault(item["workspace_id"], []).append(item)
+        result = []
+        for project in projects:
+            items = by_project.get(project["id"], [])
+            lead = next((item for item in items if item["is_lead"]), None)
+            result.append({
+                "id": project["id"],
+                "name": project["name"],
+                "connected": project["parent_id"] is not None,
+                "lead": lead,
+                # 배정된 역할만 준다. 사람이 없는 역할을 lead로 세우면
+                # 조회가 빈손으로 돌아온다.
+                "roles": [item for item in items if item["agent_id"]],
+            })
+        return result
+
+    def create_board_node(
+        self, *, project_id: str, title: str, created_by: str,
+        status: str = "todo", node_id: str | None = None,
+    ) -> dict[str, Any]:
+        node_id = node_id or str(uuid.uuid4())
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT parent_id FROM projects WHERE id = ? AND archived_at IS NULL",
+                (project_id,),
+            ).fetchone()
+            if row is None or row["parent_id"] is None:
+                raise LookupError("project is not on the board")
+            conn.execute(
+                """INSERT INTO board_nodes(id, project_id, title, status, created_by)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (node_id, project_id, title, status, created_by),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM board_nodes WHERE id = ?", (node_id,)
+                ).fetchone()
+            )
+
+    def update_board_node(
+        self, node_id: str, *, title: str | None = None, status: str | None = None
+    ) -> dict[str, Any]:
+        with self.transaction() as conn:
+            current = conn.execute(
+                "SELECT * FROM board_nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if current is None:
+                raise LookupError("node not found")
+            conn.execute(
+                """UPDATE board_nodes SET title = ?, status = ?,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                   WHERE id = ?""",
+                (
+                    current["title"] if title is None else title,
+                    current["status"] if status is None else status,
+                    node_id,
+                ),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM board_nodes WHERE id = ?", (node_id,)
+                ).fetchone()
+            )
+
+    def delete_board_node(self, node_id: str) -> bool:
+        with self.transaction() as conn:
+            # 간선은 따라서 지워진다(ON DELETE CASCADE). 내리는 것은 수동이고
+            # 사람이 판단하는 일이라 여기서 막지 않는다.
+            return conn.execute(
+                "DELETE FROM board_nodes WHERE id = ?", (node_id,)
+            ).rowcount > 0
+
+    def link_board_nodes(
+        self, *, node_id: str, waits_for: str, created_by: str
+    ) -> None:
+        with self.transaction() as conn:
+            if node_id == waits_for:
+                raise ValueError("a node cannot wait for itself")
+            found = conn.execute(
+                "SELECT id FROM board_nodes WHERE id IN (?, ?)", (node_id, waits_for)
+            ).fetchall()
+            if len(found) != 2:
+                raise LookupError("node not found")
+            # 순환은 눈으로 못 잡는다. 이어 붙이기 전에 훑는다.
+            edges: dict[str, list[str]] = {}
+            for row in conn.execute("SELECT node_id, waits_for FROM board_edges"):
+                edges.setdefault(row["node_id"], []).append(row["waits_for"])
+            stack, seen = [waits_for], set()
+            while stack:
+                current = stack.pop()
+                if current == node_id:
+                    raise ValueError("that link would make a cycle")
+                if current in seen:
+                    continue
+                seen.add(current)
+                stack.extend(edges.get(current, []))
+            conn.execute(
+                """INSERT OR IGNORE INTO board_edges(node_id, waits_for, created_by)
+                   VALUES (?, ?, ?)""",
+                (node_id, waits_for, created_by),
+            )
+
+    def unlink_board_nodes(self, *, node_id: str, waits_for: str) -> bool:
+        with self.transaction() as conn:
+            return conn.execute(
+                "DELETE FROM board_edges WHERE node_id = ? AND waits_for = ?",
+                (node_id, waits_for),
+            ).rowcount > 0
+
     def global_seq(self, *, workspace_id: str, project_seq: int) -> int | None:
         """방별 표시 번호를 전역 seq로 되돌린다. 경계에서만 쓴다."""
         with self._lock:
@@ -503,6 +783,101 @@ class FungisDB:
                 raise LookupError("project not found")
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return dict(row)
+
+    def set_role_lead(self, *, role_id: str, is_lead: bool) -> dict[str, Any]:
+        """lead 자리를 옮긴다. 방마다 하나라 앞 자리는 저절로 내려온다.
+
+        인덱스에 맡기면 두 번째 지정이 오류로 튕긴다. PM이 원하는 것은
+        "옮기기"지 "실패"가 아니라서 여기서 먼저 내린다.
+        """
+        with self.transaction() as conn:
+            role = conn.execute(
+                "SELECT workspace_id FROM workspace_roles"
+                " WHERE id = ? AND deleted_at IS NULL",
+                (role_id,),
+            ).fetchone()
+            if role is None:
+                raise LookupError("role not found")
+            if is_lead:
+                conn.execute(
+                    "UPDATE workspace_roles SET is_lead = 0"
+                    " WHERE workspace_id = ? AND deleted_at IS NULL",
+                    (role["workspace_id"],),
+                )
+            conn.execute(
+                "UPDATE workspace_roles SET is_lead = ? WHERE id = ?",
+                (1 if is_lead else 0, role_id),
+            )
+            return self._role_by_id(conn, role_id)
+
+    def lead_of(self, project_id: str) -> dict[str, Any] | None:
+        """그 방에 물으려면 누구에게 하나. 답은 늘 하나거나 없다."""
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT r.id AS role_id, r.name AS role_name, r.workspace_id,
+                          a.agent_id, p.display_name AS agent_name
+                   FROM workspace_roles r
+                   LEFT JOIN role_assignments a
+                     ON a.role_id = r.id AND a.ended_at IS NULL
+                   LEFT JOIN principals p ON p.id = a.agent_id
+                   WHERE r.workspace_id = ? AND r.deleted_at IS NULL AND r.is_lead = 1""",
+                (project_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def hq(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM projects WHERE kind = 'hq' AND archived_at IS NULL"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def connect_project(self, *, project_id: str, hq_id: str) -> dict[str, Any]:
+        """프로젝트를 보드에 붙인다. lead가 있어야 붙는다.
+
+        연결 시점에만 검사한다. 그 뒤에 lead가 빠질 수 있는데, 그때는 조회가
+        빈손으로 돌아오고 PM이 HQ에서 그걸 본다. 폴백이 PM이라 따로 막지
+        않는다.
+        """
+        with self.transaction() as conn:
+            hq = conn.execute(
+                "SELECT id FROM projects WHERE id = ? AND kind = 'hq'"
+                " AND archived_at IS NULL",
+                (hq_id,),
+            ).fetchone()
+            if hq is None:
+                raise LookupError("hq not found")
+            if project_id == hq_id:
+                raise ValueError("hq cannot be a track of itself")
+            lead = conn.execute(
+                """SELECT 1 FROM workspace_roles r
+                   JOIN role_assignments a ON a.role_id = r.id AND a.ended_at IS NULL
+                   WHERE r.workspace_id = ? AND r.deleted_at IS NULL AND r.is_lead = 1
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            if lead is None:
+                raise ValueError("the project needs a lead before it joins the board")
+            cursor = conn.execute(
+                "UPDATE projects SET parent_id = ? WHERE id = ? AND archived_at IS NULL",
+                (hq_id, project_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError("project not found")
+            return dict(
+                conn.execute(
+                    "SELECT * FROM projects WHERE id = ?", (project_id,)
+                ).fetchone()
+            )
+
+    def disconnect_project(self, *, project_id: str) -> bool:
+        with self.transaction() as conn:
+            # 노드는 남긴다. 뗐다가 다시 붙이는 일이 흔하고, 지우면 그것을
+            # 기다리던 남의 노드가 무엇을 기다렸는지 잃는다.
+            return conn.execute(
+                "UPDATE projects SET parent_id = NULL WHERE id = ? AND parent_id IS NOT NULL",
+                (project_id,),
+            ).rowcount > 0
 
     def archive_project(self, *, project_id: str) -> dict[str, Any]:
         """방을 목록에서 치운다. 메시지는 지우지 않는다.
@@ -696,7 +1071,7 @@ class FungisDB:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT r.id, r.workspace_id, r.name, r.onboarding_prompt,
+                SELECT r.id, r.workspace_id, r.name, r.onboarding_prompt, r.is_lead,
                        r.created_at, r.deleted_at,
                        CASE WHEN r.avatar IS NULL THEN 0 ELSE 1 END AS has_avatar,
                        r.avatar_updated_at,
@@ -965,7 +1340,19 @@ class FungisDB:
                 "recovery": "if inbox output was lost, fungis history 20",
             },
         }
-        encoded = json.dumps(result, ensure_ascii=False, sort_keys=True).encode()
+        # 결과 전체를 해시하면 남의 배정이 바뀔 때마다 값이 달라진다. 그러면
+        # "바뀐 것만 다시 보낸다"가 "누가 들고 나기만 해도 다시 보낸다"가 된다.
+        # 이 에이전트가 알아야 할 것만 넣는다 — 자기 역할, 부를 수 있는 역할
+        # 이름, 사용법. 담당자가 누구인지는 필요할 때 조회하면 된다.
+        stable = {
+            "project": result["project"],
+            "agent": result["agent"],
+            "own_role": result["own_role"],
+            "pm": result["pm"],
+            "role_names": sorted(role["name"] for role in roles),
+            "usage": result["usage"],
+        }
+        encoded = json.dumps(stable, ensure_ascii=False, sort_keys=True).encode()
         result["revision"] = hashlib.sha256(encoded).hexdigest()[:12]
         return result
 
@@ -975,11 +1362,12 @@ class FungisDB:
         value["assigned"] = value.get("assignment_id") is not None
         value["onboarding_sent"] = bool(value.get("onboarding_sent", 0))
         value["has_avatar"] = bool(value.get("has_avatar", 0))
+        value["is_lead"] = bool(value.get("is_lead", 0))
         return value
 
     def _role_by_id(self, conn: sqlite3.Connection, role_id: str) -> dict[str, Any]:
         row = conn.execute(
-            """SELECT r.id, r.workspace_id, r.name, r.onboarding_prompt,
+            """SELECT r.id, r.workspace_id, r.name, r.onboarding_prompt, r.is_lead,
                       r.created_at, r.deleted_at,
                       CASE WHEN r.avatar IS NULL THEN 0 ELSE 1 END AS has_avatar,
                       r.avatar_updated_at,

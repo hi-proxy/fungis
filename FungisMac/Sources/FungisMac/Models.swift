@@ -44,8 +44,14 @@ struct FungisProject: Decodable, Identifiable, Hashable {
     var createdAt: String
     /// 방에 마지막으로 들어온 메시지 seq. 메시지가 없으면 nil이다.
     var lastMessageSeq: Int?
+    /// "hq"면 상황보드를 가진 방이다. 목록에서 맨 위에 둔다.
+    ///
+    /// 옵셔널인 이유는 서버가 앱보다 낡을 수 있어서다. 필수로 받으면 칸
+    /// 하나가 없다고 스냅샷 전체가 안 읽히고 앱이 빈 화면이 된다.
+    var kind: String?
+    var isHQ: Bool { kind == "hq" }
     enum CodingKeys: String, CodingKey {
-        case id, name
+        case id, name, kind
         case createdAt = "created_at"
         case lastMessageSeq = "last_message_seq"
     }
@@ -448,4 +454,70 @@ struct PermissionRequest: Decodable, Identifiable {
         case toolInput = "tool_input"
         case createdAt = "created_at"
     }
+}
+
+// MARK: - 상황보드
+//
+// 방 스냅샷과 따로 받는다. 보드는 방에 속하지 않고, 스냅샷에 넣으면 보드가
+// 한 글자 바뀔 때마다 열려 있는 모든 방 스트림이 다시 흐른다.
+
+struct BoardNode: Decodable, Identifiable, Hashable {
+    let id: String
+    let projectID: String
+    let title: String
+    /// 저장된 값. todo / active / done
+    let status: String
+    /// 선행에서 읽은 값. waiting이 여기 더 있다
+    let state: String
+    let blockedBy: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, status, state
+        case projectID = "project_id"
+        case blockedBy = "blocked_by"
+    }
+}
+
+struct BoardTrack: Decodable, Identifiable, Hashable {
+    var id: String { projectID }
+    let projectID: String
+    let projectName: String
+    let nodes: [BoardNode]
+
+    enum CodingKeys: String, CodingKey {
+        case projectID = "project_id"
+        case projectName = "project_name"
+        case nodes
+    }
+}
+
+/// 소집 화면이 한 줄에 필요한 것. 부를 수 있나까지 같이 온다.
+struct BoardRole: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let agentName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case agentName = "agent_name"
+    }
+}
+
+struct BoardCandidate: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let connected: Bool
+    let lead: BoardRole?
+    let roles: [BoardRole]
+
+    var canJoin: Bool { lead != nil }
+}
+
+struct BoardSnapshot: Decodable {
+    let hq: FungisProject?
+    let tracks: [BoardTrack]
+    /// 없어도 되게 둔다. 노드가 앱보다 낡으면 이 칸이 안 온다.
+    let candidates: [BoardCandidate]?
+
+    static let empty = BoardSnapshot(hq: nil, tracks: [], candidates: nil)
 }

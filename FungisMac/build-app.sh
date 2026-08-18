@@ -2,7 +2,10 @@
 set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-scratch_dir="$project_dir/.build"
+# 디버그와 릴리스가 .build를 같이 쓰면 릴리스가 Foundation을 못 찾는 일이
+# 생긴다(FileManager.default가 없다는 식으로 뜬다). 8/18에 두 번 겪었다.
+# 자리를 갈라 두면 안 난다.
+scratch_dir="$project_dir/.build-release"
 app_dir="$project_dir/build/Fungis.app"
 contents_dir="$app_dir/Contents"
 module_cache="/private/tmp/fungis-swift-module-cache"

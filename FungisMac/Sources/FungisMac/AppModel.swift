@@ -11,6 +11,8 @@ struct RecipientSelection: Codable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var snapshot = FungisSnapshot.empty
+    /// 보드는 방에 속하지 않아서 스냅샷과 따로 받는다.
+    @Published var board = BoardSnapshot.empty
     @Published var selectedTargets: Set<String> = []
     @Published var selectedRoles: Set<String> = []
     /// 듣기만 하는 자리. 수신자로 넣으면 받는 쪽이 지시로 읽고 조사에 들어간다.
@@ -107,6 +109,7 @@ final class AppModel: ObservableObject {
         do {
             let fresh = try await api.state(projectID: selectedProjectID)
             apply(fresh)
+            await refreshBoard()
         } catch {
             isConnected = false
             errorMessage = error.localizedDescription
@@ -429,6 +432,76 @@ final class AppModel: ObservableObject {
     /// 테스트가 화면 없이 갱신 경로를 밟게 한다. 수신자 유지가 세 번 어긋난
     /// 자리라 논리만 따로 붙잡을 수 있어야 한다.
     func applyForTesting(_ freshSnapshot: FungisSnapshot) { apply(freshSnapshot) }
+
+    // MARK: - 상황보드
+    //
+    // 스냅샷 스트림에 얹지 않고 따로 당긴다. 보드는 방에 속하지 않아서
+    // 방 스냅샷에 넣으면 한 글자 바뀔 때마다 열려 있는 모든 방이 다시 흐른다.
+
+    func refreshBoard() async {
+        guard let fresh = try? await api.board() else { return }
+        board = fresh
+    }
+
+    func connectTrack(projectID: String) async -> Bool {
+        guard let hq = board.hq else { return false }
+        return await runBoard {
+            try await self.api.connectTrack(projectID: projectID, hqID: hq.id)
+        }
+    }
+
+    func disconnectTrack(projectID: String) async -> Bool {
+        await runBoard { try await self.api.disconnectTrack(projectID: projectID) }
+    }
+
+    func addBoardNode(projectID: String, title: String) async -> Bool {
+        await runBoard {
+            try await self.api.createBoardNode(projectID: projectID, title: title)
+        }
+    }
+
+    func setBoardNodeStatus(nodeID: String, status: String) async -> Bool {
+        await runBoard {
+            try await self.api.updateBoardNode(nodeID: nodeID, status: status)
+        }
+    }
+
+    func removeBoardNode(nodeID: String) async -> Bool {
+        await runBoard { try await self.api.deleteBoardNode(nodeID: nodeID) }
+    }
+
+    func linkBoardNodes(nodeID: String, waitsFor: String) async -> Bool {
+        await runBoard {
+            try await self.api.linkBoardNodes(nodeID: nodeID, waitsFor: waitsFor)
+        }
+    }
+
+    func unlinkBoardNodes(nodeID: String, waitsFor: String) async -> Bool {
+        await runBoard {
+            try await self.api.unlinkBoardNodes(nodeID: nodeID, waitsFor: waitsFor)
+        }
+    }
+
+    func setRoleLead(roleID: String, isLead: Bool) async -> Bool {
+        let ok = await runBoard {
+            try await self.api.setRoleLead(roleID: roleID, isLead: isLead)
+        }
+        if ok { await refresh() }
+        return ok
+    }
+
+    /// 보드를 고치는 것은 전부 같은 모양이다 — 해보고, 되면 다시 읽는다.
+    /// 순환이나 lead 없음처럼 서버가 거절하는 경우가 있어서 메시지를 살린다.
+    private func runBoard(_ body: () async throws -> Void) async -> Bool {
+        do {
+            try await body()
+            await refreshBoard()
+            return true
+        } catch {
+            errorMessage = String(describing: error)
+            return false
+        }
+    }
 
     private func apply(_ freshSnapshot: FungisSnapshot) {
         var fresh = freshSnapshot

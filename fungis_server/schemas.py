@@ -118,3 +118,29 @@ class PermissionRequestCreate(BaseModel):
 class PermissionResolve(BaseModel):
     status: str = Field(pattern="^(allowed|denied|expired)$")
     resolved_by: str | None = None
+
+
+class BoardLink(BaseModel):
+    hq_id: str = Field(min_length=1)
+
+
+class RoleLead(BaseModel):
+    is_lead: bool
+
+
+class BoardNodeCreate(BaseModel):
+    project_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    created_by: str = Field(min_length=1)
+    status: str = Field(default="todo", pattern="^(todo|active|done)$")
+
+
+class BoardNodeUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    status: str | None = Field(default=None, pattern="^(todo|active|done)$")
+
+
+class BoardEdge(BaseModel):
+    node_id: str = Field(min_length=1)
+    waits_for: str = Field(min_length=1)
+    created_by: str = Field(min_length=1)

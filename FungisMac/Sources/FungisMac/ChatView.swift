@@ -14,6 +14,7 @@ struct ChatView: View {
     @State private var inspectorTab: InspectorTab = .pins
     @State private var scrollProxy: ScrollViewProxy?
     @State private var answering: AttentionRequest?
+    @State private var showingBoard = false
     @State private var bookmarking: ChatMessage?
     @State private var pinningAfter: ChatMessage?
     @State private var contextFilter: String?
@@ -22,6 +23,13 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+
+            // 상황판은 타임라인 맨 위에 붙는다. 어느 방에 있든 전체가 보인다.
+            // 비어 있어도 띄운다. 안 띄우면 처음 붙일 자리가 없다.
+            BoardStrip(
+                tracks: model.board.tracks,
+                currentProjectID: model.selectedProjectID
+            ) { showingBoard = true }
 
             if !model.snapshot.attention.isEmpty {
                 ScrollView(.horizontal) {
@@ -182,6 +190,9 @@ struct ChatView: View {
         }
         .inspector(isPresented: $showInspector) {
             inspectorPanel.inspectorColumnWidth(min: 260, ideal: 320, max: 480)
+        }
+        .sheet(isPresented: $showingBoard) {
+            BoardSheet().environmentObject(model)
         }
         .sheet(item: $answering) { request in
             AttentionAnswerSheet(request: request)

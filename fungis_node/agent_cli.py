@@ -85,6 +85,12 @@ Use role names as stable addresses; session names may change.""",
         "permission-clear",
         help="mark this session's pending permission notice as handled",
     )
+    commands.add_parser("board", help="read the cross-project board")
+    ask = commands.add_parser(
+        "ask", help="ask another project's lead a question on the board"
+    )
+    ask.add_argument("project", help="the project whose lead should answer")
+    ask.add_argument("body", nargs="+")
     history = commands.add_parser("history", help="read shared project history")
     history.add_argument("count", nargs="?", type=int, default=20)
     history.add_argument("--after", type=int)
@@ -369,6 +375,43 @@ def emit_inbox(messages: list[dict]) -> None:
         )
 
 
+def compact_board(board: list[dict]) -> dict:
+    """보드를 에이전트가 읽을 모양으로 줄인다.
+
+    막힌 노드에는 무엇을 기다리는지와 **그 방에 물어보는 명령**을 같이 싣는다.
+    "archivia를 기다림"까지만 주면 에이전트가 누구에게 어떻게 물을지 한 번 더
+    생각해야 한다. 명령이 같이 오면 생각할 것이 없다.
+    """
+    titles = {
+        node["id"]: (track["project_id"], node["title"], node["status"])
+        for track in board
+        for node in track["nodes"]
+    }
+    tracks = []
+    for track in board:
+        nodes = []
+        for node in track["nodes"]:
+            item = {
+                "id": node["id"],
+                "title": node["title"],
+                "state": node["state"],
+            }
+            blocked = []
+            for blocker_id in node.get("blocked_by", []):
+                project_id, title, status = titles.get(
+                    blocker_id, (None, blocker_id, "unknown")
+                )
+                entry = {"project": project_id, "title": title, "status": status}
+                if project_id and project_id != track["project_id"]:
+                    entry["ask"] = f'fungis ask {project_id} "..."'
+                blocked.append(entry)
+            if blocked:
+                item["waiting_for"] = blocked
+            nodes.append(item)
+        tracks.append({"project": track["project_id"], "nodes": nodes})
+    return {"board": tracks}
+
+
 def compact_history(project_id: str, messages: list[dict]) -> dict:
     items = []
     for message in messages:
@@ -469,7 +512,12 @@ def main() -> None:
             workspace_id = args.project or active_project(
                 registry, binding["principal_id"]
             )
-            client = PMClient(config["server"], registry, workspace_id=workspace_id)
+            # 에이전트가 자기 이름으로 읽는다. PM 이름을 빌리면 아무 방이나
+            # 열린다.
+            client = PMClient(
+                config["server"], registry, workspace_id=workspace_id,
+                caller_id=binding["principal_id"],
+            )
             messages = client.timeline(args.count, after_project_seq=args.after)
             print(
                 json.dumps(
@@ -478,6 +526,34 @@ def main() -> None:
                     separators=(",", ":"),
                 )
             )
+        elif args.command == "board":
+            client = PMClient(
+                config["server"], registry,
+                caller_id=binding["principal_id"],
+            )
+            print(json.dumps(
+                compact_board(client.board()),
+                ensure_ascii=False, separators=(",", ":"),
+            ))
+        elif args.command == "ask":
+            client = PMClient(
+                config["server"], registry,
+                caller_id=binding["principal_id"],
+            )
+            hq = client.hq()
+            if hq is None:
+                raise RuntimeError("no board to ask on yet")
+            lead = client.lead_of(args.project)
+            if lead is None or not lead.get("agent_id"):
+                # lead 자리가 비면 PM이 받는다. HQ에 남으니 PM이 거기서 본다.
+                raise RuntimeError(
+                    f"{args.project} has no lead right now — ask the PM instead"
+                )
+            client.workspace_id = hq["id"]
+            result = client.send_as(
+                binding["local_name"], lead["agent_id"], " ".join(args.body)
+            )
+            print(json.dumps(stored_echo(result), ensure_ascii=False))
         elif args.command == "permission-gate":
             print(json.dumps(permission_gate(config, registry, binding, args.wait)))
         elif args.command == "permission-clear":

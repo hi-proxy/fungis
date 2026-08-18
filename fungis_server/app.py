@@ -20,6 +20,8 @@ from .schemas import (
     WorkStart, WorkUpdate,
     PermissionRequestCreate,
     PermissionResolve,
+    BoardLink, RoleLead,
+    BoardNodeCreate, BoardNodeUpdate, BoardEdge,
 )
 
 
@@ -380,6 +382,94 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def active_agent_roles() -> list[dict]:
         return db.active_agent_roles()
 
+    # ---- HQ와 상황보드 ------------------------------------------------------
+
+    @app.get("/v1/hq")
+    def read_hq() -> dict:
+        hq = db.hq()
+        if hq is None:
+            raise HTTPException(status_code=404, detail="hq not set up")
+        return hq
+
+    @app.put("/v1/projects/{project_id}/board-link")
+    def connect_project(project_id: str, payload: BoardLink) -> dict:
+        try:
+            return db.connect_project(project_id=project_id, hq_id=payload.hq_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.delete("/v1/projects/{project_id}/board-link", status_code=204)
+    def disconnect_project(project_id: str) -> None:
+        if not db.disconnect_project(project_id=project_id):
+            raise HTTPException(status_code=404, detail="project is not on the board")
+
+    @app.get("/v1/projects/{project_id}/lead")
+    def project_lead(project_id: str) -> dict:
+        lead = db.lead_of(project_id)
+        if lead is None:
+            raise HTTPException(status_code=404, detail="no lead for this project")
+        return lead
+
+    @app.put("/v1/roles/{role_id}/lead")
+    def set_role_lead(role_id: str, payload: RoleLead) -> dict:
+        try:
+            return db.set_role_lead(role_id=role_id, is_lead=payload.is_lead)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/v1/board/candidates")
+    def board_candidates() -> list[dict]:
+        return db.board_candidates()
+
+    @app.get("/v1/board")
+    def read_board() -> list[dict]:
+        # 보드는 누구나 읽는다. 대화와 달리 상태는 가릴 것이 아니다.
+        return db.board()
+
+    @app.post("/v1/board/nodes", status_code=201)
+    def create_board_node(payload: BoardNodeCreate) -> dict:
+        try:
+            return db.create_board_node(
+                project_id=payload.project_id, title=payload.title,
+                created_by=payload.created_by, status=payload.status,
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.patch("/v1/board/nodes/{node_id}")
+    def update_board_node(node_id: str, payload: BoardNodeUpdate) -> dict:
+        try:
+            return db.update_board_node(
+                node_id, title=payload.title, status=payload.status
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.delete("/v1/board/nodes/{node_id}", status_code=204)
+    def delete_board_node(node_id: str) -> None:
+        if not db.delete_board_node(node_id):
+            raise HTTPException(status_code=404, detail="node not found")
+
+    @app.post("/v1/board/edges", status_code=201)
+    def link_board_nodes(payload: BoardEdge) -> dict:
+        try:
+            db.link_board_nodes(
+                node_id=payload.node_id, waits_for=payload.waits_for,
+                created_by=payload.created_by,
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"node_id": payload.node_id, "waits_for": payload.waits_for}
+
+    @app.delete("/v1/board/edges", status_code=204)
+    def unlink_board_nodes(node_id: str = Query(...), waits_for: str = Query(...)) -> None:
+        if not db.unlink_board_nodes(node_id=node_id, waits_for=waits_for):
+            raise HTTPException(status_code=404, detail="link not found")
+
     @app.get("/v1/projects/{project_id}/bootstrap")
     def project_bootstrap(
         project_id: str,
@@ -412,11 +502,19 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @app.get("/v1/workspaces/{workspace_id}/timeline")
     def workspace_timeline(
         workspace_id: str,
+        caller: str = Query(...),
         limit: int = Query(default=100, ge=1, le=500),
         after: int | None = Query(default=None, ge=0),
         after_project_seq: int | None = Query(default=None, ge=0),
         before: int | None = Query(default=None, gt=0),
     ) -> list[dict]:
+        # caller를 선택으로 두면 안 싣는 쪽이 곧 우회로가 된다. 필수로 받는다.
+        if not db.workspace_participant(
+            workspace_id=workspace_id, principal_id=caller
+        ):
+            raise HTTPException(
+                status_code=403, detail="not a participant of this workspace"
+            )
         if after is not None and before is not None:
             raise HTTPException(status_code=422, detail="after and before are mutually exclusive")
         if after_project_seq is not None:
