@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field
 
 
 
@@ -142,6 +142,8 @@ class BoardNodeUpdate(BaseModel):
         default=None, min_length=1, max_length=200
     )
     status: str | None = Field(default=None, pattern="^(todo|active|done)$")
+    # 누가 고치는지 필수로 받는다. 선택으로 두면 안 싣는 쪽이 곧 우회로가 된다.
+    actor: str = Field(min_length=1)
 
 
 class BoardEdge(BaseModel):

@@ -25,17 +25,17 @@
 ```
 rooms
   ARCH  "ARCHIVIA bookclub"  6d2e38f9-2778-46ab-b139-8ea230c26d5a
-  FUNG  "fungis"             77eb272b-4a3b-4145-a3f3-57c2bc2f6535
-  MEI   "mei"                d15dc24e-59f6-4e56-965f-a0e03fdbdbc9
+  FUNG  "fungis"  77eb272b-4a3b-4145-a3f3-57c2bc2f6535
+  MEI  "mei"  d15dc24e-59f6-4e56-965f-a0e03fdbdbc9
 
 you       FUNG @dispatch.dev
 summary   5 tickets, 2 waiting, 2 crossRoom
 
-ARCH-11  active   "표지 정리"
+ARCH-11  active  "표지 정리"
 ARCH-12  waiting  "선행 있는 일"  blockedBy MEI-31  blocks FUNG-11
-FUNG-10  done     "끝난 일"
+FUNG-10  done  "끝난 일"
 FUNG-11  waiting  "기다리는 일"  blockedBy ARCH-12
-MEI-31   active   "맨 앞의 일"   blocks ARCH-12
+MEI-31  active  "맨 앞의 일"  blocks ARCH-12
 ```
 
 ## 읽는 규칙 셋
@@ -44,7 +44,8 @@ MEI-31   active   "맨 앞의 일"   blocks ARCH-12
 2. 줄바꿈이 티켓 경계다.
 3. 티켓 이름 `ARCH-12` 하나가 어느 방 몇 번인지 다 말한다.
 
-제목에 공백이 있어도 따옴표가 경계를 잡는다. 제목 안의 따옴표는 `\"`로 온다.
+제목에 공백이 있어도 따옴표가 경계를 잡는다. 제목 안의 따옴표는 `\"`로,
+역슬래시는 `\\`로 온다.
 줄바꿈은 저장할 때 공백으로 접히므로 제목이 줄을 깨지 않는다.
 
 ## 칸
@@ -89,7 +90,7 @@ fungis ask ARCH "..."               그 방 lead에게 묻는다
 ```
 
 이름은 `ARCH-12`도 `12`도 받는다. 맨 숫자는 내 방으로 읽는다. 남의 방 티켓을
-맨 숫자로 부르면 어느 방인지 알 수 없으므로 거절하고 후보를 보여준다 — 조용히
+맨 숫자로 부르면 어느 방인지 알 수 없으므로 거절하고 알려진 티켓을 전부 보여준다 — 조용히
 아무거나 고르면 엉뚱한 방의 일이 바뀐다.
 
 `ask`는 프리픽스를 그대로 받는다. `blockedBy ARCH-12`를 읽은 자리에서 `ARCH`를

@@ -16,6 +16,11 @@ from typing import Any, Iterator
 PERMISSION_REQUEST_TTL_SECONDS = 90
 
 
+# HQ도 티켓을 부를 이름이 있어야 한다. 참조 표기가 방 이름을 쓰니 HQ만
+# 예외로 두면 거기 티켓은 부를 말이 없다. 예약어라 다른 방은 못 가진다.
+HQ_TICKET_PREFIX = "HQ"
+
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -409,6 +414,7 @@ class FungisDB:
         self._connection.execute(
             "INSERT OR IGNORE INTO projects(id, name, kind) VALUES ('hq', 'HQ', 'hq')"
         )
+        self._backfill_ticket_prefixes()
         for table in ("workspace_roles", "messages", "shared_values", "work_items"):
             rows = self._connection.execute(
                 f"SELECT DISTINCT workspace_id FROM {table} WHERE workspace_id IS NOT NULL"
@@ -635,6 +641,81 @@ class FungisDB:
                 (workspace_id, principal_id),
             ).fetchone() is not None
 
+    def is_any_lead(self, principal_id: str) -> bool:
+        """어느 방이든 lead 자리에 앉아 있나."""
+        with self._lock:
+            return self._connection.execute(
+                """SELECT 1 FROM workspace_roles r
+                   JOIN role_assignments a
+                     ON a.role_id = r.id AND a.ended_at IS NULL
+                   WHERE r.is_lead = 1 AND r.deleted_at IS NULL AND a.agent_id = ?
+                   LIMIT 1""",
+                (principal_id,),
+            ).fetchone() is not None
+
+    def project_name(self, project_id: str) -> str:
+        """없으면 ID를 그대로 돌려준다. 거절 문구가 빈칸으로 나가면 안 된다."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT name FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        return row["name"] if row else project_id
+
+    def principal_projects(self, principal_id: str) -> list[dict[str, Any]]:
+        """이 에이전트가 지금 활성 배정을 가진 방들."""
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT DISTINCT p.id, p.name FROM role_assignments a
+                   JOIN projects p ON p.id = a.workspace_id
+                   WHERE a.agent_id = ? AND a.ended_at IS NULL
+                     AND p.archived_at IS NULL
+                   ORDER BY p.name""",
+                (principal_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def participation_denied(
+        self, *, workspace_id: str, principal_id: str
+    ) -> str:
+        """거절할 때 왜 막혔는지와 다음에 무엇을 할지 같이 말한다.
+
+        "not a participant" 만 돌려주면 받은 쪽은 자기가 어디 소속인지도,
+        누구에게 물어야 하는지도 모른 채 같은 명령을 다시 친다.
+        """
+        room = self.project_name(workspace_id)
+        if self.is_hq(workspace_id):
+            return (
+                f'"{room}" 는 소집된 방의 lead 만 쓴다. 너는 지금 어느 방의 '
+                "lead 도 아니다. 네 방 lead 를 통하거나 PM 에게 요청하라."
+            )
+        mine = [item["name"] for item in self.principal_projects(principal_id)]
+        if mine:
+            joined = ", ".join(f'"{name}"' for name in mine)
+            return f'너는 "{room}" 소속이 아니다. 속한 프로젝트는 {joined} 이다.'
+        return (
+            f'너는 "{room}" 소속이 아니다. 속한 프로젝트가 하나도 없다. '
+            "PM 에게 배정을 요청하라."
+        )
+
+    def members(self, workspace_id: str) -> dict[str, Any]:
+        """방 하나의 역할·담당자·lead. 명단은 대화와 달리 lead 가 건너서 본다."""
+        roles = [
+            {
+                "role_id": role["id"],
+                "name": role["name"],
+                "is_lead": role["is_lead"],
+                "agent_id": role.get("agent_id"),
+                "agent_name": role.get("agent_name"),
+            }
+            for role in self.roles(workspace_id)
+        ]
+        return {
+            "project_id": workspace_id,
+            "project_name": self.project_name(workspace_id),
+            "lead": next((role for role in roles if role["is_lead"]), None),
+            "roles": roles,
+        }
+
     # ---- 상황보드 ----------------------------------------------------------
 
     def board(self) -> list[dict[str, Any]]:
@@ -826,6 +907,54 @@ class FungisDB:
                 (node_id, waits_for),
             ).rowcount > 0
 
+    def board_node_project(self, node_id: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT project_id FROM board_nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+        return row["project_id"] if row else None
+
+    def board_write_denied(self, *, project_id: str, actor_id: str) -> str | None:
+        """보드에 써도 되면 None, 아니면 거절 문구.
+
+        읽기는 모두에게 열려 있다. 쓰기만 그 방 lead 와 사람(PM)의 몫이다.
+        아무나 쓰면 보드는 누가 무엇을 책임지는지 말하지 않는 목록이 된다.
+        """
+        if self.principal_kind(actor_id) == "human":
+            return None
+        lead = self.lead_of(project_id)
+        if lead is not None and lead.get("agent_id") == actor_id:
+            return None
+        room = self.project_name(project_id)
+        head = f'"{room}" 보드는 그 방 lead 나 PM 만 쓴다.'
+        if lead is None or not lead.get("agent_id"):
+            return f'{head} "{room}" 에는 지금 lead 가 없다. PM 에게 요청하라.'
+        return f'{head} "{room}" lead 는 {lead["agent_name"]} 다. 그에게 부탁하라.'
+
+    def resolve_room_id(self, given: str) -> str | None:
+        """방 이름·티켓 프리픽스·ID 를 방 ID 로 푼다. 아니면 None.
+
+        보드에서 읽은 `ARCH` 를 그대로 다시 쓸 수 있어야 한다. 한 번 더
+        대조하게 만들면 그 대조에서 착오가 난다.
+        """
+        wanted = given.strip()
+        if not wanted:
+            return None
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, name, ticket_prefix FROM projects WHERE archived_at IS NULL"
+            ).fetchall()
+        for row in rows:
+            if row["id"] == wanted:
+                return row["id"]
+        for row in rows:
+            if (row["ticket_prefix"] or "").upper() == wanted.upper():
+                return row["id"]
+        for row in rows:
+            if row["name"].casefold() == wanted.casefold():
+                return row["id"]
+        return None
+
     def global_seq(self, *, workspace_id: str, project_seq: int) -> int | None:
         """방별 표시 번호를 전역 seq로 되돌린다. 경계에서만 쓴다."""
         with self._lock:
@@ -856,6 +985,9 @@ class FungisDB:
         사람이 고쳐도 되는 값이라 여기서는 첫 제안만 만든다. 라틴 문자가
         없으면 이름 앞을 그대로 쓴다 — 한글 방 이름도 있다.
         """
+        # HQ는 HQ 방의 몫이라 다른 방에 내주지 않는다. 이름이 "HQ"로 시작하는
+        # 방이 있어도 여기서 걸러 다음 후보로 넘어간다.
+        taken = set(taken) | {HQ_TICKET_PREFIX}
         letters = [c for c in name.upper() if c.isalnum()]
         latin = [c for c in letters if c.isascii()]
         base = "".join((latin or letters)[:4]) or "T"
@@ -866,6 +998,15 @@ class FungisDB:
             if candidate not in taken:
                 return candidate
         raise ValueError("no free ticket prefix")
+
+    def _taken_ticket_prefixes(self) -> set[str]:
+        """지금 쓰이고 있는 프리픽스 전부. 잠금을 잡은 쪽에서 부른다."""
+        return {
+            row["ticket_prefix"]
+            for row in self._connection.execute(
+                "SELECT ticket_prefix FROM projects WHERE ticket_prefix IS NOT NULL"
+            )
+        }
 
     def _backfill_ticket_numbers(self) -> None:
         """이미 있던 것에 만든 순서대로 번호를 붙인다. 지우고 다시 만들지 않는다."""
@@ -879,12 +1020,25 @@ class FungisDB:
                 "UPDATE board_nodes SET number = ? WHERE id = ?",
                 (counters[row["project_id"]], row["id"]),
             )
-        taken = {
-            row["ticket_prefix"]
-            for row in self._connection.execute(
-                "SELECT ticket_prefix FROM projects WHERE ticket_prefix IS NOT NULL"
+
+    def _backfill_ticket_prefixes(self) -> None:
+        """프리픽스가 빈 방을 채운다. 새 방은 create_project 가 붙이므로
+        여기 걸리는 것은 이 코드보다 먼저 만들어진 방과 'local' 뿐이다."""
+        # 예약어를 이미 들고 있는 방이 있으면 먼저 비켜 세운다. HQ 규칙이
+        # 생기기 전 backfill 이 나눠 줬을 수 있다.
+        for row in self._connection.execute(
+            "SELECT id FROM projects WHERE ticket_prefix = ? AND kind != 'hq'",
+            (HQ_TICKET_PREFIX,),
+        ).fetchall():
+            self._connection.execute(
+                "UPDATE projects SET ticket_prefix = NULL WHERE id = ?", (row["id"],)
             )
-        }
+        self._connection.execute(
+            "UPDATE projects SET ticket_prefix = ?"
+            " WHERE kind = 'hq' AND ticket_prefix IS NULL",
+            (HQ_TICKET_PREFIX,),
+        )
+        taken = self._taken_ticket_prefixes()
         for row in self._connection.execute(
             """SELECT id, name FROM projects
                WHERE ticket_prefix IS NULL AND kind != 'hq' ORDER BY created_at, id"""
@@ -898,9 +1052,15 @@ class FungisDB:
     def create_project(self, *, name: str, project_id: str | None = None) -> dict[str, Any]:
         project_id = project_id or str(uuid.uuid4())
         with self.transaction() as conn:
+            # 프리픽스는 방을 만들 때 붙는다. 나중에 붙이면 그 사이에 만든
+            # 티켓이 부를 이름 없이 보드에 올라간다.
             conn.execute(
-                "INSERT INTO projects(id, name) VALUES (?, ?)",
-                (project_id, name.strip()),
+                "INSERT INTO projects(id, name, ticket_prefix) VALUES (?, ?, ?)",
+                (
+                    project_id,
+                    name.strip(),
+                    self.ticket_prefix_for(name.strip(), self._taken_ticket_prefixes()),
+                ),
             )
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return dict(row)
@@ -1531,6 +1691,21 @@ class FungisDB:
             "through_seq": message_seq,
         }
 
+    def _recipient_or_room_lead(self, given: str) -> str:
+        """아는 신원이면 그대로, 방 이름이면 그 방 lead 로 바꾼다."""
+        if self.principal_kind(given) is not None:
+            return given
+        room_id = self.resolve_room_id(given)
+        if room_id is None:
+            return given
+        lead = self.lead_of(room_id)
+        if lead is None or not lead.get("agent_id"):
+            room = self.project_name(room_id)
+            raise ValueError(
+                f'"{room}" 에는 지금 lead 가 없다. PM 에게 물어라.'
+            )
+        return str(lead["agent_id"])
+
     def send_message(
         self,
         *,
@@ -1552,15 +1727,21 @@ class FungisDB:
         # HQ에는 역할이 없어서 받을 사람을 고를 목록 자체가 없다. 거기서 받는
         # 사람은 소집된 방의 lead 전원이다. 고르게 하면 매번 전원을 고르게 되고
         # 한 번 빠뜨리면 그 방만 못 본다.
-        if not recipient_ids and not role_ids:
-            if not self.is_hq(workspace_id):
-                # 방에서는 받을 사람을 말해야 한다. 안 그러면 아무도 못 받는
-                # 메시지가 조용히 저장된다.
-                raise ValueError("at least one recipient or role is required")
+        if not recipient_ids and not role_ids and self.is_hq(workspace_id):
             recipient_ids = self.convened_leads()
             if not recipient_ids:
                 raise ValueError("no room has been convened yet")
+        # 일반 방에서는 수신자 0인 글을 그대로 받는다. 아무에게도 배달되지 않고
+        # 아무도 깨우지 않지만 타임라인에는 남아 history 로 읽힌다 — 주소 없는
+        # 글은 게시판에 붙인 쪽지지 부재중 전화가 아니다.
         unique_recipients = list(dict.fromkeys(recipient_ids))
+        # 수신자 자리에 방 이름이 올 수 있다. HQ 에서 "그 방에 묻는다"는 곧 그
+        # 방 lead 에게 묻는 것이라, 부르는 쪽이 사람 이름을 따로 찾지 않게 여기서
+        # 푼다. 이미 아는 신원이면 건드리지 않는다.
+        unique_recipients = [
+            self._recipient_or_room_lead(value) for value in unique_recipients
+        ]
+        unique_recipients = list(dict.fromkeys(unique_recipients))
         unique_roles = list(dict.fromkeys(role_ids or []))
         unique_references = [
             value
@@ -1773,6 +1954,32 @@ class FungisDB:
                 message["role_recipients"] = self._message_roles(message["seq"])
                 result.append(message)
         return result
+
+    def workspace_message(
+        self, *, workspace_id: str, project_seq: int
+    ) -> dict[str, Any] | None:
+        """방 안의 표시 번호로 글 하나만 꺼낸다.
+
+        앞뒤 스무 개를 받아 눈으로 골라내는 것이 지금까지의 유일한 방법이었다.
+        번호를 이미 알고 있을 때는 그 스무 개가 전부 낭비다.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT m.*, p.display_name AS sender_name,
+                          parent.project_seq AS in_reply_to_project_seq
+                   FROM messages m JOIN principals p ON p.id = m.sender_id
+                   LEFT JOIN messages parent ON parent.seq = m.in_reply_to
+                   WHERE m.workspace_id = ? AND m.project_seq = ?""",
+                (workspace_id, project_seq),
+            ).fetchone()
+            if row is None:
+                return None
+            message = dict(row)
+            message["recipients"] = self._message_recipients(message["seq"])
+            message["references"] = self._message_references(message["seq"])
+            message["tags"] = self._message_tags(message["seq"])
+            message["role_recipients"] = self._message_roles(message["seq"])
+        return message
 
     def bookmarks(self, workspace_id: str) -> list[dict[str, Any]]:
         with self._lock:

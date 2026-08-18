@@ -10,14 +10,14 @@
 ## 읽는 순서
 
 1. 이 문서의 "제품 경계"와 "하지 말 것"
-2. `git show 9f55888` — 직전 웨이브가 무엇을 왜 바꿨는지 커밋 본문에 있다
+2. `git show 63cf3b3` — 직전 웨이브가 무엇을 왜 바꿨는지 커밋 본문에 있다
 3. 필요한 범위만 "주요 코드 위치"에서 찾는다
 
 ## Git 착지 정보
 
 - 원격 저장소: `git@github.com:hi-proxy/dispatch.git` (아직 push 하지 않음. 통짜 하나로 올린다)
 - 기준 branch: `cross-project`
-- 구현 기준 commit: `9f55888` (`feat: give cross-project work one board and one lead per room`)
+- 구현 기준 commit: `63cf3b3` (`fix: let HQ speak to everyone it convened`)
 - 런타임 DB, `.venv`, Swift 빌드 산출물, 로컬 권한 설정은 Git에서 제외
 
 ## 제품 경계
@@ -52,7 +52,10 @@ Selected Project
 - 방 열람은 필터가 아니라 경계다. timeline은 caller를 필수로 받는다. 선택으로
   두면 안 싣는 쪽이 곧 우회로가 된다. 참가 판정은 별도 명부 테이블이 아니라
   `db.workspace_participant()`가 `role_assignments`에서 파생한다 — 사람은 무조건
-  통과하고, 에이전트는 그 방에 활성 배정이 있어야 통과한다. 실패는 403이며
+  통과하고, 에이전트는 그 방에 활성 배정이 있어야 통과한다. HQ(`kind='hq'`)만
+  규칙이 하나 더 있다. 소집된 어느 방에서든 lead인 에이전트는 통과한다. HQ에는
+  역할이 0건이라 배정만 보면 아무도 못 읽는다. 더하는 것이지 대신하는 것이
+  아니어서 HQ에 직접 역할을 가진 경우도 그대로 통과한다. 실패는 403이며
   빈 목록으로 뭉개지지 않는다.
 
 ## 현재 완료 범위
@@ -109,9 +112,19 @@ Selected Project
 - 방별 수신자 기억. 앱을 재시작해도 유지되고 비운 상태도 비운 채로 남는다.
   자동 선택이 기억을 덮지 않는다
 - 프로젝트를 넘어 보는 HQ 방과 상황보드. 트랙·노드·간선이며 노드는 그 방이 올리고
-  간선은 PM이 잇는다. 상태는 저장하지 않고 간선에서 뽑으며 잇기 전에 DFS로 순환을
-  막는다
+  간선은 PM이 잇는다. 상태는 저장하고 간선에서 뽑는 것은 `waiting` 하나뿐이며
+  잇기 전에 DFS로 순환을 막는다
 - 방당 lead 하나의 지정과 이동
+- 방마다 1부터 세는 티켓 번호와 방 프리픽스를 앞에 붙인 티켓 이름 `ARCH-12`.
+  프리픽스는 방을 만들 때 붙고 방 이름을 바꿔도 따라가지 않으며 HQ는 `HQ`를 쓴다
+- 보드를 JSON이 아니라 줄 프로토콜로 읽는 `fungis board`. `blocks` 역방향을 같이
+  실어 끝낸 직후에 누구에게 알릴지가 같은 줄에 있고, 모든 명령이 바뀐 줄 하나를
+  돌려주므로 보드를 다시 읽지 않는다. `board start/done/wait/unwait`은 `ARCH-12`도
+  `12`도 받고 `ask`는 프리픽스를 그대로 받는다
+- 보드 첫 열은 `예정`. `대기`는 선행에 막힌 것만 가리킨다
+- HQ에서는 수신자를 지정하지 않는 것이 곧 전원이다. 받는 사람은 서버가 소집된
+  방들의 lead 명부에서 채운다. 읽는 쪽도 같은 명부로 열리며, 소집되지 않은
+  에이전트는 그대로 403이다
 - 한 터미널 창에 에이전트 하나. 새 세션이 창을 가져가면 앞의 것을 놓아준다
 - daemon이 내려가면 서버도 같이 내려간다
 
@@ -189,10 +202,10 @@ open FungisMac/build/Fungis.app
 
 ```bash
 .venv/bin/pytest -q
-# 110 passed
+# 130 passed
 
 cd FungisMac && swift test
-# 15 passed
+# 21 passed
 
 FungisMac/build-app.sh
 # production build complete, ad-hoc signed Fungis.app
@@ -259,11 +272,6 @@ FungisMac/build-app.sh
   같이 생기고, 파싱 규칙이 어댑터별 책임이 된다.
 - HQ 상황보드 실증. 코드와 테스트는 착지했으나 연결된 트랙이 0이라 실제 화면을
   본 적이 없다. 앱에서 HQ 소집을 한 번 돌려 노드·간선·순환 차단을 확인해야 한다.
-- **HQ 방을 에이전트가 되읽지 못한다.** 열람 경계는 그 방의 활성 배정으로
-  판정하는데 HQ에는 `workspace_roles`가 0건이라 어떤 에이전트도 HQ timeline에서
-  403을 받는다(실측). `fungis ask`는 HQ에 글을 쓰지만 받은 lead는 그 방을 읽을 수
-  없다. 지금 HQ 메시지가 0건이라 아직 안 터졌을 뿐이다. HQ 참가 판정을 따로
-  두거나, 소집된 프로젝트의 lead를 HQ 참가자로 인정해야 한다.
 - 빈 방 표시(`No messages`)는 프로젝트 삭제가 보류 범위라 실증하지 못했다.
   방향 의존을 코드에서 없애 두었으므로 새 프로젝트를 만들 일이 생기면 함께
   확인한다.
