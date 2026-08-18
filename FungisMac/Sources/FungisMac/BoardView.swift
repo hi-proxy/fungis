@@ -177,10 +177,32 @@ struct BoardSheet: View {
         .frame(width: 220, alignment: .top)
         .frame(maxHeight: .infinity, alignment: .top)
         .dropDestination(for: String.self) { items, _ in
-            guard let nodeID = items.first else { return false }
+            // 잇기 드래그가 열에 떨어지면 무시한다. 같은 String이라 접두사로 가른다.
+            guard let payload = items.first,
+                  let nodeID = Self.moved(payload) else { return false }
             Task { _ = await model.setBoardNodeStatus(nodeID: nodeID, status: status) }
             return true
         }
+    }
+
+    /// 끄는 동작이 둘이라 접두사로 가른다. 몸통을 끌면 상태가 옮겨가고
+    /// 오른쪽 점을 끌면 선행이 된다.
+    private static func moved(_ payload: String) -> String? {
+        payload.hasPrefix("move:") ? String(payload.dropFirst(5)) : nil
+    }
+
+    private static func linked(_ payload: String) -> String? {
+        payload.hasPrefix("link:") ? String(payload.dropFirst(5)) : nil
+    }
+
+    /// 왼쪽이 선행이고 오른쪽이 후행이다. 오른쪽 점을 잡아 다른 카드에
+    /// 떨어뜨리면 그 카드가 이것을 기다린다. 방향을 글자로 설명하지 않아도
+    /// 손이 알게 한다.
+    private func linkHandle(_ node: BoardNode, leading: Bool) -> some View {
+        Circle()
+            .fill(leading ? Color.secondary.opacity(0.35) : Color.accentColor)
+            .frame(width: 9, height: 9)
+            .contentShape(Circle().inset(by: -6))
     }
 
     private func nodeCard(_ node: BoardNode) -> some View {
@@ -193,11 +215,6 @@ struct BoardSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                Button(linking?.id == node.id ? "잇기 취소" : "잇기") {
-                    linking = linking?.id == node.id ? nil : node
-                }
-                .buttonStyle(.plain).font(.caption2)
-                .contentShape(Rectangle())
                 Spacer()
                 Button(role: .destructive) {
                     Task { _ = await model.removeBoardNode(nodeID: node.id) }
@@ -219,7 +236,40 @@ struct BoardSheet: View {
                     lineWidth: linking?.id == node.id ? 2 : 1
                 )
         }
-        .draggable(node.id)
+        .draggable("move:\(node.id)")
+        // 받는 자리. 여기 떨어진 카드가 선행이고 이 카드가 기다린다.
+        .dropDestination(for: String.self) { items, _ in
+            guard let payload = items.first else { return false }
+            if let sourceID = Self.linked(payload) {
+                guard sourceID != node.id else { return false }
+                Task { _ = await model.linkBoardNodes(nodeID: node.id, waitsFor: sourceID) }
+                return true
+            }
+            // 카드 위에 떨어뜨려도 그 열로 옮겨진다. 카드가 열을 덮고 있어서
+            // 여기서 안 받으면 카드마다 죽은 구역이 된다.
+            if let movedID = Self.moved(payload), movedID != node.id {
+                Task {
+                    _ = await model.setBoardNodeStatus(nodeID: movedID, status: node.status)
+                }
+                return true
+            }
+            return false
+        }
+        .overlay(alignment: .leading) {
+            linkHandle(node, leading: true).offset(x: -4.5)
+        }
+        .overlay(alignment: .trailing) {
+            linkHandle(node, leading: false)
+                .offset(x: 4.5)
+                .draggable("link:\(node.id)")
+                .help("끌어서 이 뒤에 올 카드에 놓는다")
+        }
+        .contextMenu {
+            // 드래그가 안 되는 상황에도 길은 남긴다.
+            Button(linking?.id == node.id ? "잇기 취소" : "잇기 시작") {
+                linking = linking?.id == node.id ? nil : node
+            }
+        }
     }
 
     private func cardColor(_ node: BoardNode) -> some ShapeStyle {
