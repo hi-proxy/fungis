@@ -43,15 +43,11 @@ struct ChatView: View {
                 }.scrollIndicators(.hidden)
             }
 
-            if !contexts.isEmpty {
-                ContextTagTray(contexts: contexts, selected: contextFilter) { context in
-                    contextFilter = contextFilter == context ? nil : context
-                }
-                .id(model.selectedProjectID)
-                .padding(.horizontal, 20)
-                .padding(.top, model.snapshot.attention.isEmpty ? 12 : 0)
-                .padding(.bottom, 10)
-            }
+            // 상단 태그칩 트레이는 미노출. 안 쓰는 기능이 타임라인 위 한 줄을
+            // 계속 차지했다. 메시지에 붙는 태그 표시는 그대로 둔다 — 거기서는
+            // 무슨 얘기인지 알려주는 값을 한다.
+            // ContextTagTray는 지우지 않는다. 필터 자체가 없어진 것은 아니고
+            // 어디에 둘지가 아직 안 정해졌다.
 
             ScrollViewReader { proxy in
                 GeometryReader { timelineGeometry in
@@ -1119,6 +1115,10 @@ private struct MessageRow: View {
                     }
                 }
                     .font(.body).lineSpacing(3).textSelection(.enabled)
+                    // 원문과 Pretty는 줄 수가 다르다. 뒤집힌 LazyVStack 안에서는
+                    // 바뀐 높이가 다시 제안되지 않아 아래가 잘린다. Text가 자기
+                    // 높이를 그대로 말하게 둔다.
+                    .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(isMine ? Color.white : Color.primary)
                     .padding(.horizontal, 14).padding(.vertical, 11)
                     .background(bubbleColor, in: RoundedRectangle(cornerRadius: 16))

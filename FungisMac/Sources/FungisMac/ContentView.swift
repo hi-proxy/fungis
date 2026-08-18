@@ -16,20 +16,21 @@ struct ContentView: View {
         NavigationSplitView {
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(filteredProjects) { project in
-                        Button {
-                            model.selectProject(project.id)
-                        } label: {
-                            ProjectRow(
-                                project: project,
-                                repository: repository(for: project.id),
-                                selected: project.id == model.selectedProjectID,
-                                unread: model.hasUnread(project)
-                            )
-                        }
-                        // hit-area: ProjectRow가 자기 안에서 도형을 준다
-                        .buttonStyle(.plain)
-                        .contextMenu { projectMenu(project) }
+                    // HQ는 방 하나가 아니라 방들을 보는 자리다. 정렬로 위에
+                    // 올리기만 하면 스크롤하는 순간 그냥 첫 번째 방이 된다.
+                    // 구획으로 갈라야 위계가 남는다.
+                    ForEach(filteredProjects.filter(\.isHQ)) { project in
+                        projectButton(project)
+                    }
+                    if !filteredProjects.filter(\.isHQ).isEmpty,
+                       !filteredProjects.filter({ !$0.isHQ }).isEmpty {
+                        Divider().padding(.vertical, 6).padding(.horizontal, 4)
+                    }
+                    ForEach(filteredProjects.filter { !$0.isHQ }) { project in
+                        projectButton(project)
+                    }
+                    if filteredProjects.filter({ !$0.isHQ }).isEmpty, search.isEmpty {
+                        emptyProjectGuide
                     }
                 }.padding(.horizontal, 8)
             }
@@ -104,6 +105,43 @@ struct ContentView: View {
             if accessing { url.stopAccessingSecurityScopedResource() }
             Task { _ = await model.setProjectRepository(projectID: project.id, path: path) }
         }
+    }
+
+    private func projectButton(_ project: FungisProject) -> some View {
+        Button {
+            model.selectProject(project.id)
+        } label: {
+            ProjectRow(
+                project: project,
+                repository: repository(for: project.id),
+                selected: project.id == model.selectedProjectID,
+                unread: model.hasUnread(project)
+            )
+        }
+        // hit-area: ProjectRow가 자기 안에서 도형을 준다
+        .buttonStyle(.plain)
+        .contextMenu { projectMenu(project) }
+    }
+
+    /// 처음 온 사람은 HQ 하나만 보게 된다. 그것이 방 목록의 전부로 보이면
+    /// 무엇을 해야 하는지 알 길이 없다.
+    private var emptyProjectGuide: some View {
+        VStack(spacing: 8) {
+            Text("아직 프로젝트가 없다")
+                .font(.callout.bold())
+            Text("HQ는 여러 방을 함께 보는 자리다. 먼저 방을 하나 만든다.")
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("새 프로젝트", systemImage: "square.and.pencil") {
+                projectName = ""
+                creatingProject = true
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .padding(.horizontal, 8)
     }
 
     /// `.searchable(placement: .sidebar)`는 좁은 사이드바에서 돋보기 버튼으로 접히므로
@@ -233,11 +271,24 @@ private struct ProjectRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(roleInitials(project.name))
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 34, height: 34)
-                .background(roleAvatarColor(project.name), in: Circle())
+            // HQ는 방이 아니라 방들을 보는 자리다. 아바타가 다른 방과 같은
+            // 모양이면 목록에서 그냥 한 줄이 된다.
+            if project.isHQ {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(selected ? .white : Color.accentColor)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        (selected ? Color.white.opacity(0.18) : Color.accentColor.opacity(0.14)),
+                        in: RoundedRectangle(cornerRadius: 9)
+                    )
+            } else {
+                Text(roleInitials(project.name))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(roleAvatarColor(project.name), in: Circle())
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)
                     .font(.body.weight(unread ? .semibold : .medium)).lineLimit(1)
@@ -260,6 +311,8 @@ private struct ProjectRow: View {
     }
 
     private var subtitle: String {
+        // HQ에는 저장소가 없다. "No repository"는 뭔가 빠진 방처럼 보인다.
+        if project.isHQ { return "여러 방을 함께 본다" }
         guard let repository else { return "No repository" }
         guard let git = repository.git else { return repository.path }
         return (git.branch ?? "detached HEAD") + (git.dirty ? " · dirty" : "")

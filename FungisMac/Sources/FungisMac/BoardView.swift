@@ -112,10 +112,16 @@ struct BoardSheet: View {
         .padding(16)
     }
 
+    private static let columns: [(status: String, title: String)] = [
+        ("todo", "안 시작"), ("active", "하는 중"), ("done", "끝"),
+    ]
+
     private var tracks: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+        ScrollView([.horizontal, .vertical]) {
+            VStack(alignment: .leading, spacing: 0) {
+                columnHeader
                 ForEach(model.board.tracks) { track in
+                    Divider()
                     trackSection(track)
                 }
             }
@@ -123,12 +129,27 @@ struct BoardSheet: View {
         }
     }
 
+    private var columnHeader: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            Text("").frame(width: 150, alignment: .leading)
+            ForEach(Self.columns, id: \.status) { column in
+                Text(column.title)
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 220, alignment: .leading)
+            }
+        }
+        .padding(.bottom, 8)
+    }
+
+    /// 트랙 하나가 가로 한 줄이고 상태가 열이다. 상태를 드롭다운으로 두면
+    /// 한 줄씩 눌러 봐야 어디까지 왔는지 알 수 있다. 한 눈에 보라고 만든
+    /// 물건이 그러면 안 된다.
     private func trackSection(_ track: BoardTrack) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(track.projectName).font(.headline)
-                Spacer()
-                Button("보드에서 떼기") {
+                Button("떼기") {
                     Task { _ = await model.disconnectTrack(projectID: track.projectID) }
                 }
                 .buttonStyle(.plain)
@@ -137,62 +158,94 @@ struct BoardSheet: View {
                 .contentShape(Rectangle())
                 .foregroundStyle(.secondary)
             }
-            ForEach(track.nodes) { node in
-                nodeRow(node, in: track)
+            .frame(width: 150, alignment: .leading)
+
+            ForEach(Self.columns, id: \.status) { column in
+                columnCell(track, status: column.status)
             }
-            HStack {
-                TextField(
-                    "진행 중인 것을 올린다",
-                    text: Binding(
-                        get: { draftTitles[track.projectID] ?? "" },
-                        set: { draftTitles[track.projectID] = $0 }
-                    )
-                )
-                .onSubmit { addNode(to: track) }
-                Button("올리기") { addNode(to: track) }
-                    .disabled(draft(track).isEmpty)
+        }
+        .padding(.vertical, 10)
+    }
+
+    private func columnCell(_ track: BoardTrack, status: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(track.nodes.filter { $0.status == status }) { node in
+                nodeCard(node)
             }
+            if status == "todo" { addNodeField(track) }
+        }
+        .frame(width: 220, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .dropDestination(for: String.self) { items, _ in
+            guard let nodeID = items.first else { return false }
+            Task { _ = await model.setBoardNodeStatus(nodeID: nodeID, status: status) }
+            return true
         }
     }
 
-    private func nodeRow(_ node: BoardNode, in track: BoardTrack) -> some View {
-        HStack(spacing: 10) {
-            Picker("", selection: Binding(
-                get: { node.status },
-                set: { status in
-                    Task { _ = await model.setBoardNodeStatus(nodeID: node.id, status: status) }
-                }
-            )) {
-                Text("안 시작").tag("todo")
-                Text("하는 중").tag("active")
-                Text("끝").tag("done")
-            }
-            .labelsHidden()
-            .frame(width: 110)
-
-            Text(node.title)
+    private func nodeCard(_ node: BoardNode) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(node.title).font(.callout).fixedSize(horizontal: false, vertical: true)
             if node.state == "waiting" {
-                Text("대기 · \(BoardSummary.blockerNames(of: node, in: model.board.tracks).joined(separator: ","))")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                let names = BoardSummary.blockerNames(of: node, in: model.board.tracks)
+                Label(names.joined(separator: ", "), systemImage: "clock")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
-            Button(linking?.id == node.id ? "잇기 취소" : "잇기") {
-                linking = linking?.id == node.id ? nil : node
+            HStack(spacing: 8) {
+                Button(linking?.id == node.id ? "잇기 취소" : "잇기") {
+                    linking = linking?.id == node.id ? nil : node
+                }
+                .buttonStyle(.plain).font(.caption2)
+                .contentShape(Rectangle())
+                Spacer()
+                Button(role: .destructive) {
+                    Task { _ = await model.removeBoardNode(nodeID: node.id) }
+                } label: {
+                    Image(systemName: "trash").font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .font(.caption)
-            .contentShape(Rectangle())
-            Button(role: .destructive) {
-                Task { _ = await model.removeBoardNode(nodeID: node.id) }
-            } label: {
-                Image(systemName: "trash").font(.caption)
-            }
-            .buttonStyle(.plain)
-            .contentShape(Rectangle())
+            linkTargetHint(for: node)
         }
-        .padding(.vertical, 3)
-        .overlay(alignment: .leading) { linkTargetHint(for: node) }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardColor(node), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    linking?.id == node.id ? Color.accentColor : Color.secondary.opacity(0.15),
+                    lineWidth: linking?.id == node.id ? 2 : 1
+                )
+        }
+        .draggable(node.id)
+    }
+
+    private func cardColor(_ node: BoardNode) -> some ShapeStyle {
+        node.state == "waiting"
+            ? AnyShapeStyle(.orange.opacity(0.12))
+            : AnyShapeStyle(.quaternary.opacity(0.3))
+    }
+
+    private func addNodeField(_ track: BoardTrack) -> some View {
+        HStack(spacing: 6) {
+            TextField(
+                "올릴 것",
+                text: Binding(
+                    get: { draftTitles[track.projectID] ?? "" },
+                    set: { draftTitles[track.projectID] = $0 }
+                )
+            )
+            .textFieldStyle(.plain)
+            .onSubmit { addNode(to: track) }
+            Button("올리기") { addNode(to: track) }
+                .buttonStyle(.plain).font(.caption2)
+                .contentShape(Rectangle())
+                .disabled(draft(track).isEmpty)
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
     }
 
     /// 잇기를 누른 노드가 있으면, 나머지 노드가 "여기를 기다린다"로 바뀐다.
