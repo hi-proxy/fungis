@@ -97,11 +97,34 @@ struct BoardSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            if let source = linking { linkingBanner(source) }
+            // 서버가 거절해도 화면이 아무 말을 안 했다. 순환이면 409가 오는데
+            // 그것이 어디에도 안 뜨면 눌러도 안 되는 것과 구별이 안 된다.
+            if let message = model.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+            }
             Divider()
             tracks
         }
         .frame(minWidth: 720, minHeight: 460)
         .task { await model.refreshBoard() }
+    }
+
+    /// 무엇을 잡았는지, 다음에 무엇을 눌러야 하는지 글자로 말한다. 점 색깔만
+    /// 바뀌면 잡혔는지 아닌지를 사람이 알 수 없다.
+    private func linkingBanner(_ source: BoardNode) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.right.circle.fill").foregroundStyle(.green)
+            Text("‘\(source.title)’를 잡았다. 이 뒤에 올 카드의 ‘여기가 뒤’를 누른다.")
+                .font(.caption)
+            Spacer()
+            Button("취소") { linking = nil }
+                .buttonStyle(.plain).font(.caption)
+                .contentShape(Rectangle())
+        }
+        .padding(.horizontal, 16).padding(.bottom, 10)
     }
 
     private var header: some View {
@@ -192,46 +215,34 @@ struct BoardSheet: View {
         payload.hasPrefix("move:") ? String(payload.dropFirst(5)) : nil
     }
 
-    /// 왼쪽이 선행이고 오른쪽이 후행이다. 오른쪽 점을 누르면 잡히고, 다른
-    /// 카드의 왼쪽 점을 누르면 그 카드가 이것을 기다린다.
+    /// 왼쪽 점은 선행이 들어오는 표시고, 오른쪽 점이 잡는 자리다. 방향을
+    /// 글자로 설명하지 않아도 좌우가 말한다.
     ///
-    /// 끄는 방식을 두 번 시도했고 두 번 다 안 됐다. 카드가 통째로 draggable이라
-    /// 점의 드래그가 계속 먹혔다. 누르는 것은 그런 경쟁이 없다. 방향은 여전히
-    /// 점의 좌우가 말한다.
+    /// 받는 것은 점이 아니라 카드 안의 "여기가 뒤" 버튼이다. 점을 받는
+    /// 자리로도 쓰니 무엇을 눌러야 하는지가 흐려졌다. 한 가지 일만 시킨다.
     @ViewBuilder
     private func linkHandle(_ node: BoardNode, leading: Bool) -> some View {
-        let armed = linking != nil && linking?.id != node.id
-        let isSource = linking?.id == node.id
-        Button {
-            if leading {
-                guard let source = linking, source.id != node.id else { return }
-                Task {
-                    _ = await model.linkBoardNodes(nodeID: node.id, waitsFor: source.id)
-                    linking = nil
-                }
-            } else {
-                linking = isSource ? nil : node
-            }
-        } label: {
+        if leading {
             Circle()
-                .fill(handleColor(leading: leading, armed: armed, isSource: isSource))
-                .frame(width: leading && armed ? 12 : 9, height: leading && armed ? 12 : 9)
-                // hit-area: 9pt짜리 점은 손으로 못 맞춘다. 도형을 크게 준다.
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
+                .fill(node.state == "waiting" ? Color.orange : Color.secondary.opacity(0.3))
+                .frame(width: 7, height: 7)
+                .frame(width: 14)
+                .help(node.state == "waiting" ? "선행이 있다" : "선행이 들어오는 자리")
+        } else {
+            let isSource = linking?.id == node.id
+            Button {
+                linking = isSource ? nil : node
+            } label: {
+                Circle()
+                    .fill(isSource ? Color.green : Color.accentColor)
+                    .frame(width: isSource ? 11 : 8, height: isSource ? 11 : 8)
+                    // hit-area: 점은 손으로 못 맞춘다. 도형을 크게 준다.
+                    .frame(width: 20, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isSource ? "잡힘. 다시 누르면 놓는다" : "잡는다. 이 카드가 앞이 된다")
         }
-        .buttonStyle(.plain)
-        .disabled(leading ? !armed : false)
-        .help(
-            leading
-                ? "선행이 들어오는 자리. 잡은 카드가 있으면 여기를 누른다"
-                : (isSource ? "잡힘. 다시 누르면 놓는다" : "잡아서 이 뒤에 올 카드의 왼쪽 점을 누른다")
-        )
-    }
-
-    private func handleColor(leading: Bool, armed: Bool, isSource: Bool) -> Color {
-        if leading { return armed ? .green : .secondary.opacity(0.35) }
-        return isSource ? .green : .accentColor
     }
 
     /// 점은 카드 위에 얹지 않고 옆에 둔다. 카드가 통째로 draggable이라
@@ -254,6 +265,21 @@ struct BoardSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
+                // 잡은 것이 있으면 카드마다 받는 자리를 크게 연다. 9pt 점 하나로는
+                // 어디를 눌러야 하는지도, 눌리기는 한 것인지도 알 수 없다.
+                if let source = linking, source.id != node.id {
+                    Button("여기가 뒤") {
+                        Task {
+                            _ = await model.linkBoardNodes(
+                                nodeID: node.id, waitsFor: source.id
+                            )
+                            linking = nil
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .font(.caption2)
+                }
                 Spacer()
                 Button(role: .destructive) {
                     Task { _ = await model.removeBoardNode(nodeID: node.id) }
