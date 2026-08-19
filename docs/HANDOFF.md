@@ -23,8 +23,16 @@
 
 ### 브랜치 운용
 
-- **main 이 바깥 얼굴이다.** 웨이브가 끝나면 `--squash` 로 통짜 한 커밋을 만들어
-  main 에만 push 한다. 작업 브랜치는 push 하지 않는다.
+- **main 이 바깥 얼굴이다.** 웨이브가 끝나면 통짜 한 커밋을 만들어 main 에만
+  push 한다. 작업 브랜치는 push 하지 않는다. 두 번째 웨이브부터 `--squash` 는
+  항상 충돌한다 — 첫 통짜에서 이력이 갈라져 같은 변경이 두 번 온 것으로 보인다.
+  내용을 다시 풀지 말고 작업 브랜치의 트리를 그대로 커밋으로 만든다:
+
+  ```bash
+  NEW=$(git commit-tree cross-project^{tree} -p main -F msg.txt)
+  git update-ref refs/heads/main "$NEW"
+  git diff main cross-project --stat   # 비어야 한다
+  ```
 - **작업 브랜치는 실험 노트다.** 시행착오 커밋까지 그대로 남긴다 — 이 문서와
   BACKLOG 가 그 커밋 본문을 참조한다. 지우면 다음 맥락의 읽을거리가 죽는다.
 - **dev 브랜치를 두고 main 에 merge 커밋을 반복하는 방식으로 돌아가지 않는다.**
