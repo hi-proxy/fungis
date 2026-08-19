@@ -381,3 +381,33 @@ def test_project_repository_is_local_verified_and_in_snapshot(tmp_path, monkeypa
             assert client.delete("/api/projects/local/repository").status_code == 204
     finally:
         server.__exit__(None, None, None)
+
+
+def test_a_transient_state_failure_does_not_kill_the_event_socket(tmp_path, monkeypatch):
+    """한 박동의 실패로 소켓을 죽이면 앱이 재접속할 때마다 토스트가 깜빡인다.
+
+    일시 장애는 박동만 거르고, 연속 실패만 진짜 장애로 닫는다.
+    """
+    server_app = create_app(tmp_path / "server.db")
+    server = TestClient(server_app)
+    server.__enter__()
+
+    calls = {"n": 0}
+    real = None
+
+    def request(self, method, path, payload=None):
+        calls["n"] += 1
+        # 앞 두 요청은 서버가 잠깐 버벅인 것처럼 실패시킨다.
+        if calls["n"] <= 2:
+            raise RuntimeError("transient")
+        response = server.request(method, path, json=payload)
+        response.raise_for_status()
+        return {} if response.status_code == 204 else response.json()
+
+    monkeypatch.setattr("fungis_node.pm.PMClient._request", request)
+    app = create_web_app(tmp_path / "node.db", cmux=FakeCmux())
+    with TestClient(app) as client:
+        with client.websocket_connect("/api/events?project_id=local") as websocket:
+            snapshot = websocket.receive_json()
+    assert "timeline" in snapshot
+    server.__exit__(None, None, None)

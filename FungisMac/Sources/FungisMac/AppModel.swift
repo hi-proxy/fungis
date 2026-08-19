@@ -89,7 +89,12 @@ final class AppModel: ObservableObject {
             } catch {
                 if !switchingProject {
                     isConnected = false
-                    errorMessage = error.localizedDescription
+                    // 첫 실패는 조용히 재접속한다. 2초 뒤 다시 붙으면 사람이
+                    // 알 필요가 없던 일이다. 연속으로 실패할 때만 말한다.
+                    streamFailures += 1
+                    if streamFailures >= 2 {
+                        errorMessage = error.localizedDescription
+                    }
                 }
             }
             // 프로젝트를 바꿔 끊은 스트림이면 물러서지 않고 바로 다시 붙는다.
@@ -515,7 +520,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var streamFailures = 0
+
     private func apply(_ freshSnapshot: FungisSnapshot) {
+        streamFailures = 0
         var fresh = freshSnapshot
         guard fresh.projectID == selectedProjectID else { return }
         let isNewTimeline = timelineProjectID != fresh.projectID
