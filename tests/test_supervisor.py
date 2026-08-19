@@ -239,3 +239,71 @@ def test_missing_cmux_still_fails_loudly(monkeypatch):
     monkeypatch.setattr(cmux_module.shutil, "which", lambda name: None)
     monkeypatch.setattr(cmux_module.os, "access", lambda path, mode: False)
     assert cmux_module.resolve_cmux() == "cmux"
+
+
+def test_a_failed_tick_does_not_end_the_loop(tmp_path):
+    """한 바퀴가 실패했다고 루프가 끝나면 깨우기가 영영 멈춘다.
+
+    2026-08-19 에 cmux 가 잠깐 막혔을 때 실제로 그렇게 됐다. daemon 은 살아
+    있고 health 는 200 이라 앱도 사람도 정상으로 봤다. 34분 뒤에 사람이 먼저
+    알았다.
+    """
+    from fungis_node.supervisor import GATE_TICK_KEY
+
+    path = tmp_path / "node.db"
+    registry = LocalRegistry(path)
+    registry.attach("agent-1", candidate())
+    registry.close()
+
+    ticks = []
+
+    class ExplodingSupervisor(NodeSupervisor):
+        def _inbox_worker(self, recipient_id, stop_event):
+            stop_event.wait(2)
+
+        def _completion_worker(self, stop_event):
+            stop_event.wait(2)
+
+        def _tick(self, registry, watchers):
+            ticks.append(len(ticks))
+            if len(ticks) == 1:
+                raise RuntimeError("cmux 가 막혔다")
+            if len(ticks) >= 3:
+                self.test_stop.set()
+            super()._tick(registry, watchers)
+
+    stop = threading.Event()
+    supervisor = ExplodingSupervisor(path, "http://server", cmux=object(),
+                                     gate_interval=0.01)
+    supervisor.test_stop = stop
+    supervisor.run_forever(stop)
+
+    # 첫 바퀴가 터졌어도 계속 돌았다.
+    assert len(ticks) >= 3
+
+    # 그리고 성공한 바퀴만 시각을 남긴다.
+    registry = LocalRegistry(path)
+    assert registry.state(GATE_TICK_KEY)
+    registry.close()
+
+
+def test_health_reports_how_long_the_gate_has_been_quiet(tmp_path):
+    """sends_wakes 는 설정값이라 루프가 죽어도 true 다. 생사는 따로 말해야 한다."""
+    from fungis_node.supervisor import GATE_TICK_KEY
+    from fungis_node.web import gate_age_seconds
+
+    path = tmp_path / "node.db"
+    registry = LocalRegistry(path)
+
+    # 한 번도 안 돌았으면 None. 0 으로 뭉개면 죽은 루프가 살아 보인다.
+    assert gate_age_seconds(path) is None
+
+    registry.set_state(GATE_TICK_KEY, "2020-01-01T00:00:00.000Z")
+    registry.close()
+    old = gate_age_seconds(path)
+    assert old is not None and old > 60
+
+    registry = LocalRegistry(path)
+    registry.set_state(GATE_TICK_KEY, "쓰레기")
+    registry.close()
+    assert gate_age_seconds(path) is None

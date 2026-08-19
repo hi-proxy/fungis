@@ -123,7 +123,16 @@ actor DaemonManager {
             return .replaceable
         }
         if stale { return .replaceable }
-        return (parsed.sendsWakes ?? true) ? .sending : .replaceable
+        guard parsed.sendsWakes ?? true else { return .replaceable }
+        // sends_wakes 는 설정값이라 게이트 스레드가 죽어도 true 로 남는다.
+        // 8/19 에 그 루프가 34분간 멈춘 채 셋 다 초록이었고 앱은 그대로 물었다.
+        // 한 바퀴 돈 시각이 너무 낡았으면 살아 있는 척하는 daemon 이다.
+        // nil 은 갈아치우지 않는다 — 이 칸이 없는 옛 daemon 과 아직 첫 바퀴를
+        // 못 돈 daemon 이 같이 걸려 재시작 루프가 된다.
+        if let age = parsed.gateAgeSeconds, age > deadGateSeconds {
+            return .replaceable
+        }
+        return .sending
     }
 
     private func health() async -> Health {
@@ -142,12 +151,18 @@ actor DaemonManager {
     struct HealthBody: Decodable {
         let sendsWakes: Bool?
         let stale: Bool?
+        let gateAgeSeconds: Double?
 
         enum CodingKeys: String, CodingKey {
             case sendsWakes = "sends_wakes"
             case stale
+            case gateAgeSeconds = "gate_age_seconds"
         }
     }
+
+    /// 게이트가 이만큼 조용하면 죽은 것으로 본다. 정상 주기는 2초다.
+    /// 느린 기계에서 몇 틱 밀리는 것과 영영 멈춘 것을 가르는 선이다.
+    static let deadGateSeconds: Double = 60
 
     private func waitUntilHealthy() async throws {
         for _ in 0..<50 {

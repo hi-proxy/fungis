@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -11,6 +12,15 @@ from .completion import CompletionReconciler
 from .gate import IdleGate
 from .inbox import InboxWatcher
 from .registry import LocalRegistry
+
+
+# 게이트 루프가 마지막으로 한 바퀴 돈 시각. health 가 이걸 읽어 루프의 생사를
+# 말한다. node_state 에 두므로 daemon 이 바뀌어도 자리는 그대로다.
+GATE_TICK_KEY = "gate_tick_at"
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 @dataclass
@@ -28,6 +38,15 @@ class NodeSupervisor:
 
     def _log(self, kind: str, **data: object) -> None:
         print(json.dumps({"kind": kind, **data}, ensure_ascii=False), flush=True)
+
+    def _beat(self, registry: LocalRegistry) -> None:
+        """한 바퀴 돌았다는 것만 남긴다.
+
+        이 값이 없으면 밖에서 루프의 생사를 볼 방법이 없다. 로그는 앱이 버리고
+        health 는 200 을 준다. 2026-08-19 에 이 루프가 죽은 채로 34분을 갔고
+        아무도 몰랐다.
+        """
+        registry.set_state(GATE_TICK_KEY, iso_now())
 
     def _inbox_worker(self, recipient_id: str, stop_event: threading.Event) -> None:
         registry = self.registry_factory(self.registry_path)
@@ -109,27 +128,18 @@ class NodeSupervisor:
         completion.start()
         registry = self.registry_factory(self.registry_path)
         watchers: dict[str, tuple[threading.Thread, threading.Event]] = {}
+        # 뜨자마자 한 번 찍는다. 이 값이 낡은 채로 남아 있으면 앱이 아직 안 도는
+        # 루프를 도는 것으로 볼 수 있다.
+        self._beat(registry)
         try:
             while not stop_event.is_set():
-                active = self._active_recipients(registry)
-                for recipient_id in active - watchers.keys():
-                    child_stop = threading.Event()
-                    thread = threading.Thread(
-                        target=self._inbox_worker,
-                        args=(recipient_id, child_stop),
-                        name=f"fungis-inbox-{recipient_id}",
-                        daemon=True,
-                    )
-                    watchers[recipient_id] = (thread, child_stop)
-                    thread.start()
-                    self._log("watch_started", recipient_id=recipient_id)
-                for recipient_id in watchers.keys() - active:
-                    thread, child_stop = watchers.pop(recipient_id)
-                    child_stop.set()
-                    thread.join(timeout=2)
-                    self._log("watch_stopped", recipient_id=recipient_id)
-                for recipient_id in sorted(active):
-                    self._run_gate(registry, recipient_id)
+                try:
+                    self._tick(registry, watchers)
+                except Exception as error:
+                    # 한 바퀴가 실패했다고 루프를 끝내면 daemon 은 살아 있는데
+                    # 깨우기만 영영 멈춘다. 화면도 health 도 멀쩡해 보인다.
+                    # cmux 가 잠깐 막혔을 때 실제로 그렇게 됐다.
+                    self._log("tick_error", error=str(error))
                 stop_event.wait(self.gate_interval)
         except KeyboardInterrupt:
             stop_event.set()
@@ -140,3 +150,30 @@ class NodeSupervisor:
                 thread.join(timeout=3)
             completion.join(timeout=3)
             registry.close()
+
+    def _tick(
+        self,
+        registry: LocalRegistry,
+        watchers: dict[str, tuple[threading.Thread, threading.Event]],
+    ) -> None:
+        active = self._active_recipients(registry)
+        for recipient_id in active - watchers.keys():
+            child_stop = threading.Event()
+            thread = threading.Thread(
+                target=self._inbox_worker,
+                args=(recipient_id, child_stop),
+                name=f"fungis-inbox-{recipient_id}",
+                daemon=True,
+            )
+            watchers[recipient_id] = (thread, child_stop)
+            thread.start()
+            self._log("watch_started", recipient_id=recipient_id)
+        for recipient_id in watchers.keys() - active:
+            thread, child_stop = watchers.pop(recipient_id)
+            child_stop.set()
+            thread.join(timeout=2)
+            self._log("watch_stopped", recipient_id=recipient_id)
+        for recipient_id in sorted(active):
+            self._run_gate(registry, recipient_id)
+        # 한 바퀴를 끝까지 돌았을 때만 찍는다. 중간에 죽으면 시각이 안 움직인다.
+        self._beat(registry)

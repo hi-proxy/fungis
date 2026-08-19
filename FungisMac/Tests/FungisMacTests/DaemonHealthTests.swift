@@ -33,3 +33,22 @@ private func verdict(_ status: Int?, _ json: String) -> DaemonManager.Health {
     #expect(verdict(nil, "") == .down)
     #expect(verdict(500, #"{"status":"ok","sends_wakes":true,"stale":false}"#) == .down)
 }
+
+@Test func aDaemonWhoseGateStoppedTickingIsReplaceable() {
+    // sends_wakes 는 설정값이라 게이트 스레드가 죽어도 true 로 남는다. 8/19 에
+    // 그 루프가 34분간 멈췄는데 셋 다 초록이라 앱이 그 daemon 을 그대로 물었다.
+    #expect(
+        verdict(200, #"{"status":"ok","sends_wakes":true,"stale":false,"gate_age_seconds":4900}"#)
+            == .replaceable
+    )
+    #expect(
+        verdict(200, #"{"status":"ok","sends_wakes":true,"stale":false,"gate_age_seconds":2.1}"#)
+            == .sending
+    )
+    // 칸이 없거나 아직 한 바퀴도 안 돌았으면 갈아치우지 않는다. 옛 daemon 과
+    // 방금 뜬 daemon 이 같이 걸려 재시작 루프가 된다.
+    #expect(
+        verdict(200, #"{"status":"ok","sends_wakes":true,"stale":false,"gate_age_seconds":null}"#)
+            == .sending
+    )
+}

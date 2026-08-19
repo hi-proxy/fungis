@@ -68,6 +68,8 @@ def test_control_health_does_not_require_server_or_cmux(tmp_path):
             "status": "ok",
             "sends_wakes": True,
             "stale": False,
+            # 아직 한 바퀴도 안 돌았다. 0 으로 뭉개지 않는다.
+            "gate_age_seconds": None,
         }
 
 
@@ -84,6 +86,8 @@ def test_health_admits_when_it_is_not_sending_wakes(tmp_path):
             "status": "ok",
             "sends_wakes": False,
             "stale": False,
+            # 아직 한 바퀴도 안 돌았다. 0 으로 뭉개지 않는다.
+            "gate_age_seconds": None,
         }
 
 

@@ -7,6 +7,7 @@ import signal
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Literal
 
@@ -21,6 +22,7 @@ from .context_detection import commit_candidates, detect_contexts
 from .git_context import inspect_git_context, is_verified_commit
 from .pm import PMClient
 from .registry import LocalRegistry
+from .supervisor import GATE_TICK_KEY
 from .tui import ConnectionController
 
 
@@ -58,6 +60,28 @@ def source_fingerprint(roots: Iterable[Path]) -> tuple | None:
                 continue
             entries.append((str(path), stat.st_mtime_ns, stat.st_size))
     return tuple(entries) if found else None
+
+
+def gate_age_seconds(registry_path: Path) -> float | None:
+    """게이트 루프가 마지막으로 한 바퀴 돈 뒤 몇 초 지났나.
+
+    한 번도 안 돌았거나 값을 못 읽으면 None. 못 읽는 것을 0 으로 뭉개면
+    죽은 루프가 살아 있는 것으로 보인다 — 여기서 거짓 초록불을 만들지 않는다.
+    """
+    try:
+        registry = LocalRegistry(registry_path)
+        try:
+            beat = registry.state(GATE_TICK_KEY)
+        finally:
+            registry.close()
+        if not beat:
+            return None
+        seen = datetime.strptime(beat, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except Exception:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - seen).total_seconds())
 
 
 def _exit_after_response() -> None:
@@ -322,13 +346,23 @@ def create_web_app(
         # 답하던 문제. 기동 시점 지문과 지금 디스크를 대조해 앱이 이 daemon을
         # 갈아치울지 판단하게 한다. 지금 지문을 못 재면(디렉토리가 사라짐 등)
         # 낡았다고 하지 않는다 — 그쪽은 재시작해도 똑같아서 루프가 된다.
+        #
+        # gate_age_seconds: sends_wakes 는 설정값이라 게이트 스레드가 죽어도
+        # true 로 남는다. 2026-08-19 에 그 루프가 34분간 죽어 있었는데 health 는
+        # 셋 다 초록이었고 앱은 그 daemon 을 그대로 물었다. 마지막으로 한 바퀴
+        # 돈 시각을 실어 밖에서 생사를 보게 한다. 한 번도 안 돌았으면 None 이다.
         current = source_fingerprint(source_roots)
         stale = (
             startup_fingerprint is not None
             and current is not None
             and current != startup_fingerprint
         )
-        return {"status": "ok", "sends_wakes": sends_wakes, "stale": stale}
+        return {
+            "status": "ok",
+            "sends_wakes": sends_wakes,
+            "stale": stale,
+            "gate_age_seconds": gate_age_seconds(registry_path),
+        }
 
     @app.post("/shutdown")
     def shutdown_daemon(background: BackgroundTasks) -> dict[str, str]:
