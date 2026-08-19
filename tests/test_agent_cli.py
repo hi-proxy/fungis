@@ -509,6 +509,22 @@ def test_an_unknown_to_value_goes_out_as_an_address_for_the_server_to_resolve():
     assert (role_ids, direct) == ([], ["ARCH"])
 
 
+def test_a_role_can_be_typed_the_way_the_screen_shows_it():
+    """state 는 역할을 @이름으로 보여준다. 읽은 그대로 쳐야 간다.
+
+    안 받으면 @붙인 값이 수신자 자리로 새고, 서버는 그런 id 가 없다며
+    외래키 오류를 뱉는다. 화면에서 베껴 친 사람은 이유를 알 수 없다.
+    """
+    client = FakeClient(roles=[{"id": "role-1", "name": "mei.dev"}])
+    for typed in ("mei.dev", "@mei.dev"):
+        role_ids, direct, _, _ = addressing(client, Options(to=[typed]))
+        assert (role_ids, direct) == (["mei.dev"], []), typed
+
+    # cc 도 같은 화면에서 베낀다.
+    _, _, cc, _ = addressing(client, Options(cc=["@mei.dev"]))
+    assert cc == ["mei.dev"]
+
+
 def test_absolute_ids_stay_absolute():
     client = FakeClient(roles=[{"id": "role-1", "name": "reviewer"}])
     role_ids, direct, cc, cc_ids = addressing(

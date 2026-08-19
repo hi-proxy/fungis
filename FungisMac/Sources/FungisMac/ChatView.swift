@@ -1285,9 +1285,12 @@ private struct MessageRow: View {
     private var recipientSummary: String {
         let roleNames = message.roleRecipients.map { "@\($0.name)" }
         let roleAgentIDs = Set(message.roleRecipients.compactMap(\.deliveredAgentID))
+        // HQ 는 수신자를 lead 의 agent id 로 풀어서 저장한다. 역할이 없으니
+        // 그대로 두면 to 가 claude-난수로 찍힌다. 발신자 아바타와 같은 지도로
+        // 방 이름을 입힌다 — 여기서도 알고 싶은 것은 누구냐가 아니라 어느 방이냐다.
         let directNames = message.recipients
             .filter { !roleAgentIDs.contains($0.recipientID) }
-            .map(\.displayName)
+            .map { leadRooms[$0.recipientID] ?? $0.displayName }
         let names = roleNames + directNames
         let head = names.isEmpty ? "수신자 없음" : "to: " + names.joined(separator: ", ")
         // 참조도 배달되므로 누가 듣고 있었는지가 기록의 일부다. 안 보여주면
@@ -1295,7 +1298,9 @@ private struct MessageRow: View {
         guard !message.references.isEmpty else { return head }
         let copied = message.references.map { reference in
             roles.first { $0.agentID == reference.principalID }
-                .map { "@\($0.name)" } ?? reference.displayName
+                .map { "@\($0.name)" }
+                ?? leadRooms[reference.principalID]
+                ?? reference.displayName
         }
         return head + "  ·  cc: " + copied.joined(separator: ", ")
     }

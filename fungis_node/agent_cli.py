@@ -761,16 +761,31 @@ def addressing(client, args) -> tuple[list[str], list[str], list[str], list[str]
 
     --to는 먼저 이 방의 역할로 읽는다. 역할이 아니면 그대로 수신자 자리에
     넣는다 — HQ에서 방 이름을 주면 서버가 그 방 lead로 푼다.
+
+    state·board·init이 역할을 @이름으로 보여주므로 @를 붙여 치는 것을 받는다.
+    안 받으면 화면에서 읽은 것을 그대로 쳤을 때 수신자 자리로 새고, 서버가
+    그런 id는 없다며 외래키 오류를 뱉는다. 읽은 그대로 칠 수 있어야 한다.
     """
-    known: set[str] = set()
-    if args.to:
+    known: dict[str, str] = {}
+    if args.to or args.cc:
         for role in client.roles():
-            known.add(role["name"])
-            known.add(role["id"])
-    role_ids = [value for value in args.to if value in known]
-    direct = [value for value in args.to if value not in known]
+            known[role["name"]] = role["name"]
+            known[role["id"]] = role["id"]
+
+    def as_role(value: str) -> str | None:
+        return known.get(value) or known.get(value.lstrip("@"))
+
+    role_ids, direct = [], []
+    for value in args.to:
+        name = as_role(value)
+        (role_ids if name else direct).append(name or value)
     direct.extend(args.to_id)
-    return role_ids, direct, list(args.cc), list(args.cc_id)
+    return (
+        role_ids,
+        direct,
+        [as_role(value) or value for value in args.cc],
+        list(args.cc_id),
+    )
 
 
 def default_recipients(client, command: str) -> list[str]:
