@@ -128,6 +128,10 @@ class RoleLead(BaseModel):
     is_lead: bool
 
 
+class LeadAnnouncementFlush(BaseModel):
+    sender_id: str = Field(min_length=1)
+
+
 class BoardNodeCreate(BaseModel):
     project_id: str = Field(min_length=1)
     # 줄바꿈이 티켓 경계다. 제목이 그것을 깨면 프로토콜이 무너진다. escape를

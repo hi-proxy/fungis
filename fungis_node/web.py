@@ -539,6 +539,16 @@ def create_web_app(
         except Exception as error:
             raise fail(error) from error
 
+    @app.post("/api/lead-announcements/flush")
+    def flush_lead_announcements() -> dict:
+        # 소집 모달이 닫힐 때 앱이 부른다. 무엇이 바뀌었는지는 서버가
+        # 기억과의 차이로 계산하므로 여기에는 실을 것이 없다.
+        try:
+            with client() as pm:
+                return pm.flush_lead_announcements()
+        except Exception as error:
+            raise fail(error) from error
+
     @app.post("/api/roles", status_code=201)
     def create_role(payload: RolePayload) -> dict:
         try:

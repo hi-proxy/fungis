@@ -159,6 +159,40 @@ Selected Project
 - 옛 문법은 별칭으로 남기지 않고 무엇으로 바뀌었는지 한 줄로 알려주고 멈춘다.
   `ask`는 없앴다 — `send --project HQ --to <방>`이 같은 일을 한다. `init`이
   돌려주는 사용법도 새 문법으로 바꿨다
+- **lead 지정·해제 안내.** lead 로 세워지거나 내려갈 때 그 에이전트에게 한 번 간다.
+  소집 모달에서 여럿을 세워도 **모달이 닫힐 때 한 번에** 보낸다 — 즉시 보내면 모달
+  안에서 lead 를 바꿨을 때 앞사람이 이미 안내를 받아 놓고 lead 가 아니게 된다.
+  둘 다 "회신 불요"를 붙인다. 안 붙이면 소집 한 번에 방마다 "알겠다"가 돌아온다.
+
+  ```
+  너는 ARCHIVIA bookclub 프로젝트의 lead 로 선택되었다.
+  HQ 는 lead 들이 소속된 상위 프로젝트이다.
+
+    fungis history 20 --project HQ            읽는다
+    fungis send --project HQ "..."             발행한다. lead 전원이 받는다
+    fungis send --project HQ --to <project> "..."   그 프로젝트 lead 에게만
+    fungis board                               상황보드를 읽는다
+    fungis board add "..."                     네 프로젝트 트랙에 올린다
+    fungis board start / done <ticket>
+    fungis board wait / unwait <ticket> <blocker>
+
+  HQ 글은 네 프로젝트 타임라인에 안 뜬다. 전할지는 네가 정한다.
+  회신 불요.
+  ```
+
+  해제 시에는 두 줄만 보낸다.
+
+  ```
+  너는 더 이상 ARCHIVIA bookclub 프로젝트의 lead 가 아니다.
+  HQ 접근이 닫혔다.
+  회신 불요.
+  ```
+
+  전문을 보내지 않는 이유: 세션은 기억을 이어가므로 매번 설명을 실으면 이미 아는
+  것을 계속 다시 산다. 명령만 주면 현황과 사용법은 알아서 부른다.
+- **소집 모달의 저장중 표시.** lead 를 세우는 동안 표시가 없다. `AppModel.isMutating`
+  이 이미 있으니 `ConveneSheet` 이 그것을 쓰면 된다. 취소는 만들지 않는다 — 누르는
+  즉시 반영되므로 닫는 것이 곧 확정이다.
 
 ## 실행
 
@@ -309,42 +343,6 @@ FungisMac/build-app.sh
 ### 정했으나 아직 안 만든 것
 
 문구와 동작까지 합의됐고 구현만 남았다. 다시 논의하지 말고 그대로 만든다.
-
-- **lead 지정·해제 안내.** lead 로 세워지거나 내려갈 때 그 에이전트에게 한 번 간다.
-  소집 모달에서 여럿을 세워도 **모달이 닫힐 때 한 번에** 보낸다 — 즉시 보내면 모달
-  안에서 lead 를 바꿨을 때 앞사람이 이미 안내를 받아 놓고 lead 가 아니게 된다.
-  둘 다 "회신 불요"를 붙인다. 안 붙이면 소집 한 번에 방마다 "알겠다"가 돌아온다.
-
-  ```
-  너는 ARCHIVIA bookclub 프로젝트의 lead 로 선택되었다.
-  HQ 는 lead 들이 소속된 상위 프로젝트이다.
-
-    fungis history 20 --project HQ            읽는다
-    fungis send --project HQ "..."             발행한다. lead 전원이 받는다
-    fungis send --project HQ --to <project> "..."   그 프로젝트 lead 에게만
-    fungis board                               상황보드를 읽는다
-    fungis board add "..."                     네 프로젝트 트랙에 올린다
-    fungis board start / done <ticket>
-    fungis board wait / unwait <ticket> <blocker>
-
-  HQ 글은 네 프로젝트 타임라인에 안 뜬다. 전할지는 네가 정한다.
-  회신 불요.
-  ```
-
-  해제 시에는 두 줄만 보낸다.
-
-  ```
-  너는 더 이상 ARCHIVIA bookclub 프로젝트의 lead 가 아니다.
-  HQ 접근이 닫혔다.
-  회신 불요.
-  ```
-
-  전문을 보내지 않는 이유: 세션은 기억을 이어가므로 매번 설명을 실으면 이미 아는
-  것을 계속 다시 산다. 명령만 주면 현황과 사용법은 알아서 부른다.
-
-- **소집 모달의 저장중 표시.** lead 를 세우는 동안 표시가 없다. `AppModel.isMutating`
-  이 이미 있으니 `ConveneSheet` 이 그것을 쓰면 된다. 취소는 만들지 않는다 — 누르는
-  즉시 반영되므로 닫는 것이 곧 확정이다.
 
 - **매니페스트의 권한스코프.** lead 안내에 "하위 에이전트의 권한스코프"를 실기로 했으나
   지금 제품에 권한 개념이 역할 배정밖에 없어 실을 것이 없다. 권한 모델이 생길 때 함께

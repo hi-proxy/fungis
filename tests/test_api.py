@@ -1247,3 +1247,154 @@ def test_a_reply_carries_what_it_answers_to_the_reader(tmp_path):
             "/v1/messages", params={"recipient": "agent", "after": 0}
         ).json()
         assert delivered[-1]["in_reply_to_project_seq"] == asked["project_seq"]
+
+
+LEAD_APPOINTED_NOTICE = (
+    "너는 ARCHIVIA bookclub 프로젝트의 lead 로 선택되었다.\n"
+    "HQ 는 lead 들이 소속된 상위 프로젝트이다.\n"
+    "\n"
+    "  fungis history 20 --project HQ            읽는다\n"
+    '  fungis send --project HQ "..."             발행한다. lead 전원이 받는다\n'
+    '  fungis send --project HQ --to <project> "..."   그 프로젝트 lead 에게만\n'
+    "  fungis board                               상황보드를 읽는다\n"
+    '  fungis board add "..."                     네 프로젝트 트랙에 올린다\n'
+    "  fungis board start / done <ticket>\n"
+    "  fungis board wait / unwait <ticket> <blocker>\n"
+    "\n"
+    "HQ 글은 네 프로젝트 타임라인에 안 뜬다. 전할지는 네가 정한다.\n"
+    "회신 불요."
+)
+
+LEAD_RELEASED_NOTICE = (
+    "너는 더 이상 ARCHIVIA bookclub 프로젝트의 lead 가 아니다.\n"
+    "HQ 접근이 닫혔다.\n"
+    "회신 불요."
+)
+
+
+def lead_flush_setup(client, agents):
+    """pm과 에이전트들, 그리고 HANDOFF 문구 그대로의 프로젝트 하나."""
+    client.put(
+        "/v1/principals/pm",
+        json={"id": "pm", "kind": "human", "display_name": "pm"},
+    )
+    for agent_id in agents:
+        client.put(
+            f"/v1/principals/{agent_id}",
+            json={"id": agent_id, "kind": "agent", "display_name": agent_id},
+        )
+    client.post(
+        "/v1/projects", json={"id": "archivia", "name": "ARCHIVIA bookclub"}
+    )
+
+
+def flush(client):
+    response = client.post(
+        "/v1/lead-announcements/flush", json={"sender_id": "pm"}
+    )
+    assert response.status_code == 200
+    return response.json()["announcements"]
+
+
+def inbox_bodies(client, agent_id):
+    return [
+        item["body"]
+        for item in client.get(
+            "/v1/messages", params={"recipient": agent_id, "after": 0}
+        ).json()
+    ]
+
+
+def test_first_flush_delivers_the_missed_lead_appointment_notice(tmp_path):
+    """migration 직후 announced가 NULL이면 이미 앉아 있던 lead도 첫 flush에서
+    지정 안내를 받는다 — 못 받았던 안내를 받는 것이 맞는 동작이다.
+    HQ는 역할이 0건이라 flush가 그냥 지나가고, 같은 상태의 두 번째 flush는
+    아무것도 보내지 않는다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        lead_flush_setup(client, ["leader"])
+        join(client, "archivia", "leader", lead=True)
+
+        first = flush(client)
+        assert [(a["project_id"], a["kind"], a["agent_id"]) for a in first] == [
+            ("archivia", "appointed", "leader")
+        ]
+        assert inbox_bodies(client, "leader") == [LEAD_APPOINTED_NOTICE]
+        # 문구의 <project>는 에이전트가 읽는 자리 표시라 채우지 않는다.
+        assert "--to <project>" in inbox_bodies(client, "leader")[0]
+
+        # 무변경이면 아무것도 안 나간다.
+        assert flush(client) == []
+        assert inbox_bodies(client, "leader") == [LEAD_APPOINTED_NOTICE]
+
+
+def test_flush_sends_only_the_difference_between_open_and_close(tmp_path):
+    """모달 안에서 A로 세웠다 B로 바꾸면 A에게는 아무것도 가지 않는다.
+    열리기 전 lead였던 C는 해제 안내를, B는 지정 안내를 받는다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        lead_flush_setup(client, ["agent-a", "agent-b", "agent-c"])
+        roles = {
+            agent_id: join(client, "archivia", agent_id)
+            for agent_id in ("agent-a", "agent-b", "agent-c")
+        }
+        client.put(
+            f"/v1/roles/{roles['agent-c']['id']}/lead", json={"is_lead": True}
+        )
+        flush(client)  # 모달이 열리기 전 상태: C가 lead다.
+
+        # 모달 안에서 A로 세웠다가 B로 갈아탄다.
+        client.put(
+            f"/v1/roles/{roles['agent-a']['id']}/lead", json={"is_lead": True}
+        )
+        client.put(
+            f"/v1/roles/{roles['agent-b']['id']}/lead", json={"is_lead": True}
+        )
+
+        changes = flush(client)
+        assert [(a["kind"], a["agent_id"]) for a in changes] == [
+            ("released", "agent-c"), ("appointed", "agent-b")
+        ]
+        assert inbox_bodies(client, "agent-a") == []
+        assert inbox_bodies(client, "agent-b")[-1] == LEAD_APPOINTED_NOTICE
+        assert inbox_bodies(client, "agent-c")[-1] == LEAD_RELEASED_NOTICE
+
+
+def test_flush_sends_a_release_notice_when_the_lead_steps_down(tmp_path):
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        lead_flush_setup(client, ["leader"])
+        role = join(client, "archivia", "leader", lead=True)
+        flush(client)
+
+        client.put(f"/v1/roles/{role['id']}/lead", json={"is_lead": False})
+        changes = flush(client)
+        assert [(a["kind"], a["agent_id"]) for a in changes] == [
+            ("released", "leader")
+        ]
+        assert inbox_bodies(client, "leader")[-1] == LEAD_RELEASED_NOTICE
+        # 해제까지 안내가 끝났으면 다음 flush는 조용하다.
+        assert flush(client) == []
+
+
+def test_flush_remembers_an_assignee_less_lead_without_messaging_anyone(tmp_path):
+    """담당자 없는 lead 역할은 보낼 사람이 없다. 메시지 없이 announced만
+    갱신하므로, 나중에 담당자가 앉아도 flush는 다시 보내지 않는다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        lead_flush_setup(client, ["latecomer"])
+        role = client.post(
+            "/v1/workspaces/archivia/roles", json={"name": "editor"}
+        ).json()
+        client.put(f"/v1/roles/{role['id']}/lead", json={"is_lead": True})
+
+        assert flush(client) == []
+        client.put(
+            f"/v1/roles/{role['id']}/assignment",
+            json={
+                "agent_id": "latecomer", "assigned_by": "pm",
+                "send_onboarding": False,
+            },
+        )
+        assert flush(client) == []
+        assert inbox_bodies(client, "latecomer") == []

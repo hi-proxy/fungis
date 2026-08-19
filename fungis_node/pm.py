@@ -454,6 +454,15 @@ class PMClient:
         assert isinstance(result, dict)
         return result
 
+    def flush_lead_announcements(self) -> dict:
+        """소집 모달이 닫힐 때 부른다. 서버가 기억하는 "마지막 안내"와 지금
+        lead의 차이만 그 담당자에게 나간다."""
+        result = self._request(
+            "POST", "/v1/lead-announcements/flush", {"sender_id": self.pm_id}
+        )
+        assert isinstance(result, dict)
+        return result
+
     def lead_of(self, project_id: str) -> dict | None:
         try:
             result = self._request(

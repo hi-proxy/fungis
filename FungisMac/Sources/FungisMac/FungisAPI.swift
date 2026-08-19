@@ -99,6 +99,12 @@ struct FungisAPI: Sendable {
         )
     }
 
+    func flushLeadAnnouncements() async throws {
+        let _: EmptyResponse = try await request(
+            "api/lead-announcements/flush", method: "POST", acceptsAnyObject: true
+        )
+    }
+
     func snapshots(projectID: String = "local") -> AsyncThrowingStream<FungisSnapshot, Error> {
         AsyncThrowingStream { continuation in
             var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!

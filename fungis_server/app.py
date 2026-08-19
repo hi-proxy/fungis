@@ -20,9 +20,30 @@ from .schemas import (
     WorkStart, WorkUpdate,
     PermissionRequestCreate,
     PermissionResolve,
-    BoardLink, RoleLead,
+    BoardLink, RoleLead, LeadAnnouncementFlush,
     BoardNodeCreate, BoardNodeUpdate, BoardEdge,
 )
+
+# lead 지정·해제 안내. 문구는 docs/HANDOFF.md에서 합의된 그대로다.
+# <project>는 에이전트가 읽는 자리 표시라 채우지 않는다. 프로젝트 이름
+# 자리만 실제 이름으로 바뀐다.
+LEAD_APPOINTED_TEMPLATE = """너는 {project} 프로젝트의 lead 로 선택되었다.
+HQ 는 lead 들이 소속된 상위 프로젝트이다.
+
+  fungis history 20 --project HQ            읽는다
+  fungis send --project HQ "..."             발행한다. lead 전원이 받는다
+  fungis send --project HQ --to <project> "..."   그 프로젝트 lead 에게만
+  fungis board                               상황보드를 읽는다
+  fungis board add "..."                     네 프로젝트 트랙에 올린다
+  fungis board start / done <ticket>
+  fungis board wait / unwait <ticket> <blocker>
+
+HQ 글은 네 프로젝트 타임라인에 안 뜬다. 전할지는 네가 정한다.
+회신 불요."""
+
+LEAD_RELEASED_TEMPLATE = """너는 더 이상 {project} 프로젝트의 lead 가 아니다.
+HQ 접근이 닫혔다.
+회신 불요."""
 
 
 class EventHub:
@@ -430,6 +451,39 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             return db.set_role_lead(role_id=role_id, is_lead=payload.is_lead)
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/v1/lead-announcements/flush")
+    async def flush_lead_announcements(payload: LeadAnnouncementFlush) -> dict:
+        # 소집 모달이 닫힐 때 한 번 불린다. 지정·해제를 즉시 보내면 모달
+        # 안에서 lead를 갈아탄 앞사람이 안내를 받아 놓고 lead가 아니게
+        # 된다. 그래서 차이 계산은 서버 기억(announced)과의 비교로 하고,
+        # 메시지는 그 방에서 pm이 그 담당자 하나에게 보낸다 — 깨우기까지
+        # 기존 배달 경로를 그대로 탄다.
+        announcements: list[dict] = []
+        for change in db.flush_lead_announcements():
+            deliveries = (
+                ("released", change["released_agent_id"], LEAD_RELEASED_TEMPLATE),
+                ("appointed", change["appointed_agent_id"], LEAD_APPOINTED_TEMPLATE),
+            )
+            for kind, agent_id, template in deliveries:
+                if agent_id is None:
+                    continue
+                message, events = db.send_message(
+                    workspace_id=change["project_id"],
+                    sender_id=payload.sender_id,
+                    recipient_ids=[agent_id],
+                    role_ids=[],
+                    body=template.format(project=change["project_name"]),
+                )
+                for event in events:
+                    await hub.publish(event)
+                announcements.append({
+                    "project_id": change["project_id"],
+                    "kind": kind,
+                    "agent_id": agent_id,
+                    "message_seq": message["seq"],
+                })
+        return {"announcements": announcements}
 
     @app.get("/v1/board/candidates")
     def board_candidates(caller: str = Query(...)) -> list[dict]:

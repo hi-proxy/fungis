@@ -30,6 +30,10 @@ struct ConveneSheet: View {
         }
         .frame(minWidth: 520, minHeight: 420)
         .task { await model.refreshBoard() }
+        // lead 지정·해제 안내는 닫힐 때 한 번에 나간다. 여기서 세운 것과
+        // 열리기 전 상태의 차이만 서버가 계산해 보낸다 — 모달 안에서 A를
+        // 세웠다 B로 바꿨으면 A에게는 아무것도 가지 않는다.
+        .onDisappear { Task { await model.flushLeadAnnouncements() } }
     }
 
     private var candidates: [BoardCandidate] { model.board.candidates ?? [] }
@@ -92,7 +96,7 @@ struct ConveneSheet: View {
                     let isLead = role.id == candidate.lead?.id
                     Button(leadChipLabel(candidate, role: role, isLead: isLead)) {
                         // 이미 lead인 칩은 누를 일이 없다. 눌러도 같은 자리다.
-                        guard !isLead else { return }
+                        guard !isLead, !model.isMutating else { return }
                         Task { _ = await model.setRoleLead(roleID: role.id, isLead: true) }
                     }
                     .buttonStyle(.plain)
@@ -108,7 +112,10 @@ struct ConveneSheet: View {
                         in: Capsule()
                     )
                     .contentShape(Capsule())
-                    .disabled(isLead)
+                    // 저장중 표시. lead를 세우는 동안 칩 전부가 흐려지고
+                    // 눌리지 않는다. 취소는 없다 — 닫는 것이 곧 확정이다.
+                    .opacity(model.isMutating ? 0.4 : 1)
+                    .disabled(isLead || model.isMutating)
                 }
             }
             .padding(.leading, 28)
