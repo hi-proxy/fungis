@@ -71,6 +71,19 @@ class InboxWatcher:
                 max(int(message["seq"]) for message in messages),
                 binding["agent_session_id"],
             )
+            return messages
+        # 볼 것이 없으면 그 깨우기는 소진된 것이다. 안 지우면 게이트가
+        # wake_unconfirmed 로 이후 깨우기를 TTL 10분 동안 전부 거부한다.
+        #
+        # Stop 훅을 쓰는 저장소에서는 이게 예외가 아니라 상례다. 훅이 턴 끝마다
+        # 인박스를 비우므로, 그 직후 도착한 깨우기는 읽을 것이 없는 채로 뜬다.
+        # 그러면 깨우기 한 번마다 10분씩 눈이 먼다. 2026-08-19 에 PM 이 그 창에
+        # 두 건을 보냈고 둘 다 안 갔다.
+        outstanding = self.registry.outstanding_wake(self.recipient_id)
+        if outstanding is not None:
+            self.registry.mark_wake_processed(
+                self.recipient_id, int(outstanding["through_seq"])
+            )
         return messages
 
     def read_current(self, current_surface_id: str | None) -> tuple[dict, list[dict]]:

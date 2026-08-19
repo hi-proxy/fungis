@@ -300,3 +300,46 @@ def test_unconfirmed_wake_does_not_deafen_forever(tmp_path, monkeypatch):
     assert gate.run("agent-1", send=True).eligible is True
     assert len(cmux.wakes) == 2
     registry.close()
+
+
+def test_an_empty_read_clears_the_wake_it_answered(tmp_path, monkeypatch):
+    """볼 것이 없어도 깨우기는 소진된 것이다.
+
+    안 지우면 게이트가 wake_unconfirmed 로 이후 깨우기를 TTL 10분 동안 전부
+    거부한다. Stop 훅을 쓰는 저장소에서는 이게 상례다 — 훅이 턴 끝마다 인박스를
+    비우므로 그 직후 도착한 깨우기는 읽을 것이 없는 채로 뜬다. 2026-08-19 에
+    PM 이 그 창에 두 건을 보냈고 둘 다 안 갔다.
+    """
+    from fungis_node.cmux import CmuxAgentCandidate
+    from fungis_node.inbox import InboxWatcher
+    from fungis_node.registry import LocalRegistry
+
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach("agent-1", CmuxAgentCandidate(
+        provider="claude", agent_session_id="session-1", surface_id="surface-1",
+        surface_ref="surface:1", workspace_ref="workspace:1", title="Agent",
+        tty="ttys001", cwd="/project", lifecycle="idle",
+        binding_verified=True, verification_reason="agent_tty_matches_surface",
+    ))
+    registry.record_wake("agent-1", 7)
+    assert registry.outstanding_wake("agent-1") is not None
+
+    watcher = InboxWatcher("http://127.0.0.1:8787", "agent-1", registry)
+    monkeypatch.setattr(
+        InboxWatcher, "_http_get",
+        lambda self, path, params: {"processed_seq": 7} if "state" in path else [],
+    )
+    assert watcher.read_messages("surface-1") == []
+    assert registry.outstanding_wake("agent-1") is None
+
+    # 읽을 것이 있으면 종전대로 claim 을 잡는다. 지우는 쪽으로만 바뀐 게 아니다.
+    registry.record_wake("agent-1", 9)
+    monkeypatch.setattr(
+        InboxWatcher, "_http_get",
+        lambda self, path, params: (
+            {"processed_seq": 7} if "state" in path else [{"seq": 9, "body": "x"}]
+        ),
+    )
+    assert len(watcher.read_messages("surface-1")) == 1
+    assert registry.claim("agent-1")["through_seq"] == 9
+    registry.close()
