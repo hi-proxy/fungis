@@ -16,6 +16,9 @@ struct ChatView: View {
     @State private var answering: AttentionRequest?
     @State private var showingBoard = false
     @State private var bookmarking: ChatMessage?
+    /// 지금 답하는 대상. 에이전트는 `fungis reply 42` 로 참조를 걸어 왔는데
+    /// PM 쪽에는 그 자리가 없어서 사슬이 한쪽에서만 이어졌다.
+    @State private var replyingTo: ChatMessage?
     @State private var pinningAfter: ChatMessage?
     @State private var contextFilter: String?
     @State private var activeTimelinePinID: String?
@@ -69,7 +72,8 @@ struct ChatView: View {
                                             pmProfile: model.snapshot.pmProfile,
                                             roles: model.snapshot.roles,
                                             leadRooms: leadRooms,
-                                            isBookmarked: bookmarkedSequences.contains(message.seq)
+                                            isBookmarked: bookmarkedSequences.contains(message.seq),
+                                            reply: { replyingTo = message }
                                         ) {
                                             contextFilter = contextFilter == $0 ? nil : $0
                                         } bookmark: {
@@ -166,9 +170,13 @@ struct ChatView: View {
             }
             ChatComposer(
                 tracks: tracks, gitBranches: gitBranches,
-                recipientLabel: recipientLabel
+                recipientLabel: recipientLabel,
+                replyingTo: $replyingTo
             )
             .id(model.selectedProjectID)
+            // 방을 옮기면 답할 대상도 두고 간다. 방 번호는 방마다 1부터라
+            // 남겨두면 다른 글을 가리킨다.
+            .onChange(of: model.selectedProjectID) { replyingTo = nil }
         }
         .toolbar {
             ToolbarItem {
@@ -461,6 +469,9 @@ private struct ChatComposer: View {
     let tracks: [String]
     let gitBranches: [String]
     let recipientLabel: String
+    /// 답할 대상. 보낸 뒤 여기서 지운다 — 한 번 건 참조가 다음 글까지
+    /// 따라가면 사슬이 엉뚱한 데로 이어진다.
+    @Binding var replyingTo: ChatMessage?
     @State private var draft = ""
     @State private var draftTrack = ""
     @State private var draftTags = ""
@@ -471,6 +482,24 @@ private struct ChatComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            if let target = replyingTo {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrowshape.turn.up.left")
+                    Text("#\(target.displaySeq) 에 답하는 중").lineLimit(1)
+                    Text(target.body.prefix(60))
+                        .foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Button {
+                        replyingTo = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain).help("답할 대상 지우기")
+                }
+                .font(.caption)
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
+            }
             if showMetadata {
                 HStack(spacing: 8) {
                     Menu {
@@ -773,9 +802,11 @@ private struct ChatComposer: View {
         if await model.send(
             body, to: targets, roles: roles,
             references: model.selectedReferenceIDs,
+            inReplyTo: replyingTo?.seq,
             track: track.isEmpty ? nil : track, tags: tags
         ) {
             draft = ""
+            replyingTo = nil
         }
     }
 
@@ -1117,6 +1148,7 @@ private struct MessageRow: View {
     /// 발신자 principal id → 그가 lead 인 방 이름. HQ 타임라인에서만 실질이 있다.
     let leadRooms: [String: String]
     let isBookmarked: Bool
+    let reply: () -> Void
     let selectContext: (String) -> Void
     let bookmark: () -> Void
     @State private var showPretty = true
@@ -1192,6 +1224,14 @@ private struct MessageRow: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(isBookmarked ? .orange : .secondary)
                     .help("타임라인 북마크 추가")
+                    Button(action: reply) {
+                        Image(systemName: "arrowshape.turn.up.left")
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("이 글에 답하기")
                     Button {
                         showPretty.toggle()
                     } label: {
