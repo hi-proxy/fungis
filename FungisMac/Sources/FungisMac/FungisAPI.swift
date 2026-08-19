@@ -34,6 +34,17 @@ struct FungisAPI: Sendable {
         try await request("api/state?project_id=\(encoded(projectID))")
     }
 
+    // MARK: 코드 보기
+
+    /// 방에 걸린 저장소 안의 파일 한 장. 비서가 짚어 준 자리를 보는 용도다.
+    /// 그리는 것은 앱이므로 토큰이 들지 않는다 — 코드를 메시지에 베끼지 않게
+    /// 하려고 있는 길이다.
+    func file(projectID: String, path: String) async throws -> RepositoryFile {
+        try await request(
+            "api/projects/\(encoded(projectID))/file?path=\(encoded(path))"
+        )
+    }
+
     // MARK: 상황보드
 
     func board() async throws -> BoardSnapshot {

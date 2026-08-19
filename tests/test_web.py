@@ -415,3 +415,52 @@ def test_a_transient_state_failure_does_not_kill_the_event_socket(tmp_path, monk
             snapshot = websocket.receive_json()
     assert "timeline" in snapshot
     server.__exit__(None, None, None)
+
+
+def test_a_file_view_cannot_escape_the_repository(tmp_path):
+    """비서가 짚어 준 자리를 보는 것이지 기계를 훑는 것이 아니다.
+
+    받은 경로를 그대로 열면 ../ 하나로 저장소 밖이 열린다. 신뢰 경계라 여기서
+    막는다.
+    """
+    from fungis_node.web import read_repository_file
+
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "thing.py").write_text("one\ntwo\nthree\n")
+    (tmp_path / "secret.txt").write_text("남의 것")
+
+    seen = read_repository_file(str(repo), "pkg/thing.py")
+    assert seen["lines"] == ["one", "two", "three"]
+    assert seen["path"] == "pkg/thing.py"
+    assert seen["total_lines"] == 3
+    assert seen["truncated"] is False
+
+    for outside in ("../secret.txt", "pkg/../../secret.txt", "/etc/hosts"):
+        try:
+            read_repository_file(str(repo), outside)
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError(f"저장소 밖이 열렸다: {outside}")
+
+    try:
+        read_repository_file(str(repo), "pkg")
+    except IsADirectoryError:
+        raise AssertionError("디렉토리는 파일 없음으로 답해야 한다")
+    except FileNotFoundError:
+        pass
+
+
+def test_a_long_file_is_cut_and_says_so(tmp_path):
+    """파일 전체를 다 보내지 않는다. 자른 것을 자르지 않은 척하지도 않는다."""
+    from fungis_node import web
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "big.txt").write_text("\n".join(str(i) for i in range(6000)))
+
+    seen = web.read_repository_file(str(repo), "big.txt")
+    assert len(seen["lines"]) == web.FILE_VIEW_MAX_LINES
+    assert seen["total_lines"] == 6000
+    assert seen["truncated"] is True

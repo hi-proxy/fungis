@@ -19,6 +19,8 @@ struct ChatView: View {
     /// 지금 답하는 대상. 에이전트는 `fungis reply 42` 로 참조를 걸어 왔는데
     /// PM 쪽에는 그 자리가 없어서 사슬이 한쪽에서만 이어졌다.
     @State private var replyingTo: ChatMessage?
+    /// 지금 열어 둔 코드 자리.
+    @State private var viewingCode: CodeReference?
     @State private var pinningAfter: ChatMessage?
     @State private var contextFilter: String?
     @State private var activeTimelinePinID: String?
@@ -73,7 +75,8 @@ struct ChatView: View {
                                             roles: model.snapshot.roles,
                                             leadRooms: leadRooms,
                                             isBookmarked: bookmarkedSequences.contains(message.seq),
-                                            reply: { replyingTo = message }
+                                            reply: { replyingTo = message },
+                                            openCode: { viewingCode = $0 }
                                         ) {
                                             contextFilter = contextFilter == $0 ? nil : $0
                                         } bookmark: {
@@ -207,6 +210,9 @@ struct ChatView: View {
         }
         .sheet(item: $pinningAfter) { message in
             TimelinePinEditor(after: message)
+        }
+        .sheet(item: $viewingCode) { reference in
+            CodeSheet(reference: reference, projectID: model.selectedProjectID)
         }
     }
 
@@ -1149,6 +1155,7 @@ private struct MessageRow: View {
     let leadRooms: [String: String]
     let isBookmarked: Bool
     let reply: () -> Void
+    let openCode: (CodeReference) -> Void
     let selectContext: (String) -> Void
     let bookmark: () -> Void
     @State private var showPretty = true
@@ -1215,6 +1222,8 @@ private struct MessageRow: View {
                         }
                     }
 
+                CodeReferenceRow(references: codeReferences, open: openCode)
+
                 HStack(spacing: 7) {
                     Button(action: bookmark) {
                         Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
@@ -1265,6 +1274,12 @@ private struct MessageRow: View {
     }
 
     private var isMine: Bool { message.senderID == pmID }
+
+    /// 본문에서 찾은 코드 자리. 원문을 볼 때만 뽑으면 Pretty 에서 사라지므로
+    /// 표시 방식과 무관하게 둔다.
+    private var codeReferences: [CodeReference] {
+        CodeReference.found(in: message.body)
+    }
 
     @ViewBuilder private var senderAvatar: some View {
         if isMine {

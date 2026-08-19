@@ -62,6 +62,37 @@ def source_fingerprint(roots: Iterable[Path]) -> tuple | None:
     return tuple(entries) if found else None
 
 
+# 한 번에 돌려주는 최대 줄 수. 비서가 짚어 준 자리를 보는 것이 목적이라
+# 파일 전체를 다 보내지 않는다. 넘으면 잘라서 보내고 잘렸다고 말한다.
+FILE_VIEW_MAX_LINES = 4000
+
+
+def read_repository_file(repo_root: str, relative: str) -> dict[str, object]:
+    """저장소 안의 파일 한 장을 읽는다.
+
+    비서가 `fungis_node/inbox.py:68` 이라고 짚어 주면 PM 이 눌러서 그 줄을 본다.
+    앱이 그리는 것이므로 토큰이 들지 않는다 — 코드를 메시지 본문에 베껴 넣는
+    대신 여기를 쓴다.
+
+    **저장소 밖으로 못 나간다.** 받은 경로를 풀어서 뿌리 안에 있는지 확인한다.
+    `../` 도, 심볼릭 링크도 여기서 걸린다. 이건 신뢰 경계라 줄이지 않는다.
+    """
+    root = Path(repo_root).resolve()
+    target = (root / relative).resolve()
+    if not target.is_relative_to(root):
+        raise PermissionError(f"path escapes the repository: {relative}")
+    if not target.is_file():
+        raise FileNotFoundError(f"not a file: {relative}")
+    text = target.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    return {
+        "path": str(target.relative_to(root)),
+        "lines": lines[:FILE_VIEW_MAX_LINES],
+        "total_lines": len(lines),
+        "truncated": len(lines) > FILE_VIEW_MAX_LINES,
+    }
+
+
 def gate_age_seconds(registry_path: Path) -> float | None:
     """게이트 루프가 마지막으로 한 바퀴 돈 뒤 몇 초 지났나.
 
@@ -701,6 +732,24 @@ def create_web_app(
             return pm.resolve_permission_request(
                 request_id, payload.status, resolved_by=str(pm.pm_id)
             )
+
+    @app.get("/api/projects/{project_id}/file")
+    def project_file(project_id: str, path: str = Query(min_length=1)) -> dict:
+        registry = LocalRegistry(registry_path)
+        try:
+            repository = registry.project_repository(project_id)
+        finally:
+            registry.close()
+        if repository is None:
+            raise HTTPException(
+                status_code=404, detail="this room has no repository"
+            )
+        try:
+            return read_repository_file(repository["path"], path)
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/api/projects")
     def projects() -> list[dict]:

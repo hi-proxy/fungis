@@ -54,7 +54,9 @@ final class AppModel: ObservableObject {
     /// 다음 할 일을 바로 보여준다.
     @Published var showsRoleSetup = false
 
-    private let api = FungisAPI()
+    /// CodeSheet 이 파일 한 장을 직접 읽는다. 스냅샷에 실을 값이 아니라
+    /// 열었을 때만 가져오는 것이라 모델을 거치지 않는다.
+    let api = FungisAPI()
     private var timelineProjectID: String?
     private var prefetchedProjectID: String?
     private var streamTask: Task<Void, Error>?

@@ -531,3 +531,54 @@ struct BoardSnapshot: Decodable {
 
     static let empty = BoardSnapshot(hq: nil, tracks: [], candidates: nil)
 }
+
+/// 저장소 파일 한 장. 비서가 `path:line` 으로 짚은 자리를 보는 데 쓴다.
+struct RepositoryFile: Decodable {
+    let path: String
+    let lines: [String]
+    let totalLines: Int
+    let truncated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case path, lines, truncated
+        case totalLines = "total_lines"
+    }
+}
+
+/// 메시지 본문에서 찾아낸 코드 자리. `path:12` 도 `path:12-40` 도 받는다.
+struct CodeReference: Hashable, Identifiable {
+    let path: String
+    let firstLine: Int
+    let lastLine: Int
+
+    var id: String { "\(path):\(firstLine)-\(lastLine)" }
+    var label: String {
+        firstLine == lastLine ? "\(path):\(firstLine)"
+                              : "\(path):\(firstLine)-\(lastLine)"
+    }
+
+    /// 본문에서 코드 자리를 뽑는다. 비서에게 코드를 인용하지 말고 이 형식으로
+    /// 쓰라고 정했으므로(EPIC-secretary), 그 형식을 여기서 읽는다.
+    ///
+    /// 확장자를 요구한다. 안 그러면 `fungis reply 42` 나 `#397:1` 같은 것이
+    /// 전부 파일로 잡힌다.
+    static func found(in body: String) -> [CodeReference] {
+        let pattern = #"([\w./-]+\.[A-Za-z]{1,10}):(\d+)(?:-(\d+))?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(body.startIndex..., in: body)
+        var found: [CodeReference] = []
+        for match in regex.matches(in: body, range: range) {
+            guard let path = Range(match.range(at: 1), in: body).map({ String(body[$0]) }),
+                  let firstText = Range(match.range(at: 2), in: body).map({ String(body[$0]) }),
+                  let first = Int(firstText)
+            else { continue }
+            let lastText = Range(match.range(at: 3), in: body).map { String(body[$0]) }
+            let last = lastText.flatMap(Int.init) ?? first
+            let reference = CodeReference(
+                path: path, firstLine: first, lastLine: max(first, last)
+            )
+            if !found.contains(reference) { found.append(reference) }
+        }
+        return found
+    }
+}
