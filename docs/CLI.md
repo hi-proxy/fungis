@@ -161,13 +161,18 @@ member    @designer  NONE      -
 fungis history 20
 fungis history 20 --project HQ
 fungis history 20 --after 30
-fungis history --ref 42          글 하나만 꺼낸다
+fungis history --ref 42          그 글만 꺼낸다
+fungis history --ref 42 47 51    여러 개를 한 번에
 ```
 
 개수는 1에서 500 사이다. 기본은 20이다.
 
-`--ref`는 방 안의 표시 번호로 글 하나를 꺼낸다. 참조 사슬을 따라갈 때 쓴다 —
+`--ref`는 방 안의 표시 번호로 그 글만 꺼낸다. 참조 사슬을 따라갈 때 쓴다 —
 `in_reply_to: 41`을 보고 그 글을 보려면 `fungis history --ref 41`이다.
+
+번호를 여러 개 줄 수 있다. 밀려 있던 것을 훑을 때 한 건씩 왕복하면 그 왕복이
+곧 소음이다. 돌려주는 순서는 친 순서가 아니라 방 번호 순이다 — 방에서 일어난
+순서로 읽는 것이 맞다.
 
 ```
 {"project":"77eb272b-4a3b-4145-a3f3-57c2bc2f6535","messages":[{"seq":42,"at":"2026-08-18T19:20:34Z","from":"codex-1","to":["PM"],"body":"구현 끝났다","kind":"message","reply_level":"r1","in_reply_to":41,"track":"feature/login","tags":["commit/abc123"]}]}

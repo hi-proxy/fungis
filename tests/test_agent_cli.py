@@ -614,7 +614,8 @@ def test_only_three_short_flags_exist(capsys):
 
 def test_history_names_one_message_by_its_number_and_picks_a_room():
     args = parser().parse_args(["history", "--ref", "42"])
-    assert args.ref == 42
+    # 하나만 줘도 목록이다. 부르는 쪽이 두 모양을 가리지 않게 한다.
+    assert args.ref == [42]
     room = parser().parse_args(["history", "20", "--project", "HQ"])
     assert (room.count, room.project) == (20, "HQ")
 
@@ -733,3 +734,15 @@ def test_inbox_does_not_follow_a_broadcast_into_hq(tmp_path, monkeypatch):
     follow([{"workspace_id": "other-room"}])
     assert active_project(registry, "agent-1") == "other-room", "일반 방은 따라간다"
     registry.close()
+
+
+def test_history_ref_takes_several_numbers_at_once():
+    """밀려 있던 것을 훑을 때 한 건씩 왕복하면 그 왕복이 곧 소음이다.
+
+    조용히 남긴 것들의 번호를 받아 한 번에 꺼내는 자리다.
+    """
+    args = parser().parse_args(["history", "--ref", "42", "47", "51"])
+    assert args.ref == [42, 47, 51]
+
+    # 안 주면 None 이라 count 경로로 간다.
+    assert parser().parse_args(["history", "20"]).ref is None

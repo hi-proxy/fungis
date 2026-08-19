@@ -238,8 +238,8 @@ Another room's member list is for its lead only.""",
     history.add_argument("count", nargs="?", type=int, default=20)
     history.add_argument("--after", type=int)
     history.add_argument(
-        "--ref", type=int,
-        help="one message only, named by its number in the room",
+        "--ref", type=int, nargs="+", metavar="N",
+        help="only these messages, named by their number in the room",
     )
     history.add_argument(
         "-p", "--project",
@@ -1043,8 +1043,11 @@ def main() -> None:
             )
             workspace_id = resolve_project(client, args.project, mine)
             client.workspace_id = workspace_id
-            if args.ref is not None:
-                messages = [client.message(args.ref)]
+            if args.ref:
+                # 번호 여러 개를 한 번에 받는다. 밀려 있던 것을 훑을 때 한 건씩
+                # 왕복하면 그 자체가 소음이다. 방 번호 순으로 돌려준다 — 친
+                # 순서가 아니라 방에서 일어난 순서로 읽는 것이 맞다.
+                messages = [client.message(ref) for ref in sorted(set(args.ref))]
             else:
                 messages = client.timeline(args.count, after_project_seq=args.after)
             print(
