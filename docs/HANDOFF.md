@@ -17,9 +17,19 @@
 
 ## Git 착지 정보
 
-- 원격 저장소: `git@github.com:hi-proxy/dispatch.git` (아직 push 하지 않음. 통짜 하나로 올린다)
+- 원격 저장소: `git@github.com:hi-proxy/fungis.git`
 - 기준 branch: `cross-project`
-- 구현 기준 commit: `dd261a4` (`docs: write down the CLI an agent actually meets`)
+- 구현 기준 commit: `40e5360` (`docs: turn the critique wave into a work list`)
+
+### 브랜치 운용
+
+- **main 이 바깥 얼굴이다.** 웨이브가 끝나면 `--squash` 로 통짜 한 커밋을 만들어
+  main 에만 push 한다. 작업 브랜치는 push 하지 않는다.
+- **작업 브랜치는 실험 노트다.** 시행착오 커밋까지 그대로 남긴다 — 이 문서와
+  BACKLOG 가 그 커밋 본문을 참조한다. 지우면 다음 맥락의 읽을거리가 죽는다.
+- **dev 브랜치를 두고 main 에 merge 커밋을 반복하는 방식으로 돌아가지 않는다.**
+  예전 이력이 `Merge branch 'dev'` 로 도배됐던 그 방식이다. 브랜치는 웨이브
+  단위로 만들고, 끝나면 squash 로 main 에 얹고, 노트로 남긴다.
 - 런타임 DB, `.venv`, Swift 빌드 산출물, 로컬 권한 설정은 Git에서 제외
 
 ## 제품 경계
