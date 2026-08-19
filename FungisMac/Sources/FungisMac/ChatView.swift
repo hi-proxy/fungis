@@ -741,7 +741,10 @@ private struct ChatComposer: View {
                 .map(\.id)
             roles = Array(model.selectedRoles)
         }
-        guard !targets.isEmpty || !roles.isEmpty else { return }
+        // HQ 는 비워서 보내는 것이 곧 전원이다. 버튼만 열고 여기서 조용히
+        // 돌아가면 눌리는데 아무 일도 안 일어나는 버튼이 된다 — 보드 잇기에서
+        // 세 번 밟은 그 무늬다.
+        guard isHQ || !targets.isEmpty || !roles.isEmpty else { return }
         let body = rawBody.trimmingCharacters(in: .whitespacesAndNewlines)
         let track = draftTrack.trimmingCharacters(in: .whitespacesAndNewlines)
         let tags = draftTags.split(separator: ",")
