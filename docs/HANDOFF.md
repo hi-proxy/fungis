@@ -1,13 +1,134 @@
 # fungis 개발 핸드오프
 
-기준일: 2026-08-18
-상태: 로컬 실사용 가능한 SwiftUI 개발 빌드
+기준일: 2026-08-19
+상태: 로컬 실사용 가능한 SwiftUI 개발 빌드. **지금은 안 뜬다 — 아래 "지금 막힌 것" 먼저.**
+
+---
+
+# 지금 막힌 것 (2026-08-19 19:40 이후)
+
+맥이 크래시로 재부팅됐다. 재부팅 뒤 **fungis 가 cmux 를 못 찾아 daemon 이 안 뜬다.**
+cmux 자체는 정상이다.
+
+## 원인 후보 1순위 — PATH
+
+`demo.py:151` 이 `shutil.which("cmux")` 로 PATH 를 본다.
+
+```python
+if shutil.which(CmuxAdapter().executable) is None:
+    raise RuntimeError("cmux를 PATH에서 못 찾았다. ...")
+```
+
+실측한 cmux 위치는 이렇다.
+
+```
+/Applications/cmux.app/Contents/Resources/bin/cmux
+```
+
+**앱 번들 안이라 기본 PATH 에 없다.** 셸에서는 프로필이 넣어 줘서 보이지만,
+Finder 나 로그인 항목으로 뜬 GUI 앱은 최소 PATH(`/usr/bin:/bin:/usr/sbin:/sbin`)만
+받는다. 그러면 이 검사가 걸리고 daemon 이 뜨기 전에 죽는다.
+
+재부팅 전에 됐던 이유는 그때 앱이 셸에서 떴거나 daemon 이 이미 살아 있었기
+때문일 가능성이 크다. **재부팅이 그 우연을 지웠다.**
+
+- **확인법**: 앱을 셸에서 띄워 본다. `open FungisMac/build/Fungis.app` 말고
+  실행 파일을 직접 — 셸 PATH 를 물려받으면 뜬다는 것이 확인되면 원인 확정이다
+- **고치는 법(약 2줄)**: PATH 만 믿지 말고 앱 번들 경로를 폴백으로 둔다.
+  `shutil.which` 실패 시 `/Applications/cmux.app/Contents/Resources/bin/cmux`
+  존재를 확인한다. 이 검사 자체는 지우지 않는다 — "초록불인데 아무것도 안 되는
+  상태"를 막으려고 일부러 넣은 것이다
+- **아직 안 고쳤다.** 크래시 조사 중에 변수를 늘리지 않으려고 놔뒀다. PM 판단 대기
+
+## 크래시가 fungis 탓인가 — 지금까지 나온 것
+
+**단정할 근거가 없다.** 사용자 공간 앱(Python daemon · SwiftUI)이 macOS 를
+패닉시키는 것은 일반적으로 드라이버·하드웨어 쪽 일이라 가능성이 낮다.
+
+재부팅 8분 뒤 실측한 부하가 비정상으로 높았다.
+
+```
+load average  5.89  24.91  19.31   (uptime 8분)
+상위 프로세스  WindowServer 50.5% · logioptionsplus_agent 16.4% · cmux 16.1%
+```
+
+fungis 는 이때 떠 있지도 않았다. **Logitech Options+ 와 WindowServer 가 눈에
+띄고, Karabiner 도 돈다.** 조사한다면 이쪽이 먼저다.
+
+- 볼 곳: `/Library/Logs/DiagnosticReports/` (커널 패닉은 시스템 쪽에 쌓인다.
+  사용자 쪽 `~/Library/Logs/DiagnosticReports/` 가 아니다). 이번에는 접근이
+  막혀 목록을 못 읽었다 — 손으로 확인이 필요하다
+- 재부팅 시각: `last reboot` 기준 2026-08-19 19:40
+
+---
 
 제품 명세: [PRODUCT_SPEC.md](PRODUCT_SPEC.md)
 보드 프로토콜: [BOARD_PROTOCOL.md](BOARD_PROTOCOL.md) — 에이전트가 보드를 읽고 쓰는 법
 에이전트 CLI: [CLI.md](CLI.md) — 동사 셋, 주소 넷, 자리별 기본 수신자
 고칠 목록: [BACKLOG.md](BACKLOG.md) — 리팩토링 비판 웨이브의 일감. 위치·완료 기준까지
 저장소 상태: 로컬 Git repository, branch `cross-project`. 구현 기준 SHA는 아래 착지 정보에 기록한다.
+
+# 2026-08-19 착지
+
+## 이날 고친 것
+
+| commit | 무엇 |
+|---|---|
+| `74617e9` | 역할을 **화면에 보이는 대로**(`@이름`) 칠 수 있게. HQ 타임라인 `to` 가 `claude-난수` 로 뜨던 것도 같은 뿌리라 함께 |
+| `6e6c351` | 아무도 안 받았을 때 그렇다고 말한다. 일반 방 `send` 는 지목이 없으면 아무도 안 받는데 성공 출력이 실패처럼 안 보였다 |
+
+`pytest 173` · `swift 26` · 앱 번들 갱신됨.
+
+둘 다 **루프 손 시행 중에 실사용으로 드러난 것**이다. 앞의 것은 내가 `state`
+화면에서 읽은 값을 그대로 쳤다가 `409 FOREIGN KEY constraint failed` 를 맞았고,
+뒤의 것은 한 리드가 세 번 연속 아무에게도 안 가는 메시지를 보냈다.
+
+**공통 교훈**: 화면이 보여주는 형태와 칠 수 있는 형태가 다르면 베껴 친 사람은
+이유를 알 수 없다.
+
+## 루프 시행 기록 — 이 저장소 밖에 있다
+
+`~/kr.homil/dispatch-ops/` (git 밖)
+
+- `LOOP.md` — 운영 루프 설계 (8/18, 485줄, "남은 미결: 없음")
+- `LOOP-RUN-1.md` — 첫 시행 완결본. ARCH-3/TICKET-044, **완주** (잎 6·약 1시간·정지 0회)
+- `LOOP-RUN-2.md` — 둘째 시행(문서 대수선 에픽) 진행 중. **정지 1시간 사례**
+- `RETRO-hq.md` · `CROSS-PROJECT.md` — HQ 웨이브 회고와 기획
+
+### 두 시행이 같은 결핍의 두 얼굴을 보여줬다
+
+```
+044 ③  걸음이 보고 왕복보다 짧다   정지와 작업 중 구분 불가  → 오탐 핑 2회
+045 ①  착수만 선언하고 턴이 없다   일이 있는데 턴이 없음     → 진짜 정지 1시간
+```
+
+044 에서는 일하고 있는데 죽은 줄 알았고, 045 에서는 죽어 있는데 일하는 줄 알았다.
+**밖에서 보이는 침묵 하나로 둘을 가를 수 없다.**
+
+그리고 archivia 와 mei 가 서로 모르고 같은 값을 가리켰다 — archivia 는 정지를 겪고
+`wake --in`(자기 예약)이 그 자리라고 했고, mei 는 같은 날 `next_wake_at` 이 어댑터
+경계에서 제일 값진 값이라고 했다. **둘이 같은 값이다.**
+
+→ 루프 v0 의 항목 둘(상태 판정기 · wake 예약)이 하나로 접힌다.
+어댑터가 내는 것은 상태 5종이 아니라 **`(state, next_wake_at)` 쌍**이다.
+
+## PM 답을 기다리는 것
+
+1. **`LOOP.md` 반영 여부** — v0 상태 판정기의 출력에 `next_wake_at` 추가하고,
+   어댑터 경계의 질문을 "밀어 넣어도 되나"에서 **"언제 반응하나"**로 바꿀지.
+   mei 에서는 앞 질문의 답이 항상 예라서 뜻이 없다. 045 정지 1시간이 실측 근거다
+2. **보조인력이 `r2`(티켓 경계)를 승인할 수 있나.** `r3` 는 소유자로 둘 생각이다
+3. **보조인력이 맥인가 윈도우인가.** 맥이면 오늘 구조로 붙고, 윈도우면 앱이
+   SwiftUI 라 화면이 없는 것이 벽이라 M1 인증이 선행이다
+4. **cmux PATH 폴백을 넣을지** — 위 "지금 막힌 것" 참고
+
+## 미보고
+
+에픽 초안(`EPIC-participation.md`)과 보드 등록(`FUNG-3`~`FUNG-8`) 결과를 PM 에게
+아직 못 보냈다. **서버가 내려가 있어 보낼 수 없었다.** 서버가 살아나면 이것부터
+보낸다.
+
+---
 
 ## 읽는 순서
 
@@ -19,7 +140,7 @@
 
 - 원격 저장소: `git@github.com:hi-proxy/fungis.git`
 - 기준 branch: `cross-project`
-- 구현 기준 commit: `40e5360` (`docs: turn the critique wave into a work list`)
+- 구현 기준 commit: `6e6c351` (`fix: say when a message reached nobody`)
 
 ### 브랜치 운용
 
@@ -352,6 +473,25 @@ FungisMac/build-app.sh
 2. M2 실제 다중 클라이언트 LAN/VPN 검증과 soak
 3. M3 Windows Node와 PowerShell/WSL terminal adapter
 4. M4 Windows PM desktop client
+
+### 잡아 둔 에픽 — 사람과 여러 클라이언트
+
+초안: [EPIC-participation.md](EPIC-participation.md) · 보드: `FUNG-3` ~ `FUNG-8`
+
+보조인력(PM2) 투입을 검토하다 나왔다. 같은 빈자리가 **두 번** 드러났다 — HQ 를
+만들 때 한 번(구성원이 역할이 아니라 소집된 방의 lead 라 특례 분기를 넣었다),
+사람을 방 하나에만 넣으려 할 때 또 한 번. 빠진 개념은 **참가**다.
+
+`db.py:601` 주석이 스스로 그렇게 말한다 — "참가 = 역할 보유로 본다. 지금 모델에서
+방에 있다는 것을 말하는 다른 수단이 없다."
+
+`membership(workspace_id, principal_id)` 을 일급으로 놓으면 특례 둘(human 무조건
+통과 · HQ 분기)이 **지워진다.** 코드가 느는 게 아니라 준다. 잎 순서와 닫힘 판정은
+초안 문서에 있다. **착수 전이고 PM 승인 대기다.**
+
+한 가지는 임시로 하지 않기로 했다 — 사람을 `role_assignments` 에 먼저 앉혀 두고
+나중에 걷어내는 것. 굳으면 훨씬 비싸다. **PM2 를 넣는 시점 = membership 하는
+시점**으로 묶는다.
 
 ### 정했으나 아직 안 만든 것
 
