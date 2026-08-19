@@ -148,10 +148,12 @@ class DaemonLauncher(DemoLauncher):
         # cmux가 없으면 뜨자마자 죽는다. 예전에는 그냥 떴다 — health는 200을
         # 주는데 화면 상태를 만들 때마다 409가 나고 웹소켓이 조용히 끊겼다.
         # 초록불인데 아무것도 안 되는 상태가 제일 나쁘다. 여기서 막는다.
+        # 찾는 것은 어댑터가 한다 — PATH 다음에 앱 번들 자리까지 본다.
         if shutil.which(CmuxAdapter().executable) is None:
             raise RuntimeError(
-                "cmux를 PATH에서 못 찾았다. 이 daemon은 앱이 띄우는 것이고,"
-                " 손으로 띄우려면 cmux가 PATH에 있어야 한다."
+                "cmux를 못 찾았다. PATH 에도 없고 아는 앱 번들 자리에도 없다."
+                " 이 daemon 은 앱이 띄우는 것이고, 손으로 띄우려면 cmux 가"
+                " PATH 에 있어야 한다."
             )
         # 연결된 에이전트가 없어도 뜬다. 앱이 이 daemon을 띄우고, 에이전트를
         # 연결하는 길은 그 앱뿐이라, 여기서 막으면 처음 켜는 사람은 영영

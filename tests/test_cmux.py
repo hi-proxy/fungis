@@ -8,6 +8,11 @@ from fungis_node.agent_cli import current_binding
 
 
 class FakeCmux(CmuxAdapter):
+    def __init__(self, **kwargs):
+        # 실행 파일을 어디서 찾는지는 이 파일의 관심이 아니다. 고정하지 않으면
+        # 어댑터가 이 기계의 cmux 절대 경로를 들고 와서 호출 인자 비교가 깨진다.
+        super().__init__(executable="cmux", **kwargs)
+
     def _run_json(self, *args):
         return {
             "windows": [

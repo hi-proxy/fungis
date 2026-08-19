@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import selectors
+import shutil
 import subprocess
 from .terminal import AgentCandidate
 from dataclasses import asdict, dataclass
@@ -25,6 +26,30 @@ LIFECYCLE_MAP = {
 CmuxAgentCandidate = AgentCandidate
 
 
+# cmux 실행 파일은 앱 번들 안에 있다. 셸은 프로필이 PATH에 넣어 줘서 보이지만,
+# Finder나 로그인 항목으로 뜬 GUI 앱은 최소 PATH만 물려받아 못 찾는다. 이
+# daemon을 띄우는 것이 그 앱이라, PATH만 믿으면 재부팅 한 번에 조용히 못 뜬다.
+CMUX_BUNDLE_PATHS = (
+    Path("/Applications/cmux.app/Contents/Resources/bin/cmux"),
+    Path.home() / "Applications/cmux.app/Contents/Resources/bin/cmux",
+)
+
+
+def resolve_cmux(name: str = "cmux") -> str:
+    """PATH를 먼저 보고, 없으면 아는 번들 자리를 본다.
+
+    못 찾으면 이름을 그대로 돌려준다 — 그래야 daemon의 시작 검사가 지금처럼
+    걸려서 "PATH에서 못 찾았다"로 죽는다. 여기서 조용히 성공시키지 않는다.
+    """
+    found = shutil.which(name)
+    if found is not None:
+        return found
+    for path in CMUX_BUNDLE_PATHS:
+        if os.access(path, os.X_OK):
+            return str(path)
+    return name
+
+
 class CmuxError(RuntimeError):
     pass
 
@@ -33,10 +58,12 @@ class CmuxAdapter:
     def __init__(
         self,
         *,
-        executable: str = "cmux",
+        executable: str | None = None,
         hook_store_dir: str | Path = Path.home() / ".cmuxterm",
     ) -> None:
-        self.executable = executable
+        # 한 번 풀어서 들고 있는다. 부르는 자리가 여섯이라 여기서 풀지 않으면
+        # 시작 검사만 통과하고 실제 호출에서 죽는다.
+        self.executable = executable or resolve_cmux()
         self.hook_store_dir = Path(hook_store_dir)
 
     def _run_json(self, *args: str) -> dict[str, Any]:

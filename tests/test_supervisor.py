@@ -209,3 +209,33 @@ def test_supervisor_sends_wakes_when_the_caller_says_nothing():
         cmux=None,
     )
     assert supervisor.send_wakes
+
+
+def test_cmux_is_found_in_the_app_bundle_when_path_does_not_have_it(monkeypatch):
+    """GUI 로 뜬 앱은 최소 PATH 만 물려받는다.
+
+    cmux 실행 파일은 앱 번들 안에 있어서 셸에서만 보인다. 앱이 이 daemon 을
+    띄우므로 PATH 만 믿으면 재부팅 한 번에 조용히 못 뜬다. 2026-08-19 에
+    실제로 그렇게 막혔다.
+    """
+    from fungis_node import cmux as cmux_module
+
+    bundle = cmux_module.CMUX_BUNDLE_PATHS[0]
+    monkeypatch.setattr(cmux_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        cmux_module.os, "access", lambda path, mode: str(path) == str(bundle)
+    )
+    assert cmux_module.resolve_cmux() == str(bundle)
+
+    # 어댑터가 그 값을 들고 있어야 한다. 시작 검사만 통과하고 실제 호출에서
+    # 죽으면 초록불인데 안 되는 상태가 그대로 돌아온다.
+    assert cmux_module.CmuxAdapter().executable == str(bundle)
+
+
+def test_missing_cmux_still_fails_loudly(monkeypatch):
+    """못 찾으면 이름을 그대로 돌려준다. daemon 의 시작 검사가 걸려야 한다."""
+    from fungis_node import cmux as cmux_module
+
+    monkeypatch.setattr(cmux_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cmux_module.os, "access", lambda path, mode: False)
+    assert cmux_module.resolve_cmux() == "cmux"
