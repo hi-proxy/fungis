@@ -659,8 +659,8 @@ def test_init_teaches_the_new_syntax_and_the_whole_board(tmp_path):
     assert 'fungis reply --cc ROLE "..."' in output
     assert "fungis state" in output
     # 기다린다는 것을 못 적으면 막힌 일이 보드에서 안 막힌 것으로 보인다.
-    assert "fungis board wait ID BLOCKER" in output
-    assert "fungis board unwait ID BLOCKER" in output
+    assert "fungis board wait TICKET BLOCKER_TICKET" in output
+    assert "fungis board unwait TICKET BLOCKER_TICKET" in output
 
 
 def test_a_reference_split_from_its_body_says_so(capsys):

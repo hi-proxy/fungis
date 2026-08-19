@@ -409,9 +409,9 @@ def format_bootstrap(value: dict) -> str:
             # 보드에 올리는 것은 그 방의 몫이다. 안 알려주면 PM이 대신 쳐 넣게
             # 되고, 그러면 보드는 PM이 이미 아는 것만 담는다.
             '- board: fungis board / fungis board add "..." / '
-            "fungis board start ID / fungis board done ID / "
+            "fungis board start TICKET / fungis board done TICKET / "
             # 기다린다는 것을 못 적으면 막힌 일이 보드에서 안 막힌 것으로 보인다.
-            "fungis board wait ID BLOCKER / fungis board unwait ID BLOCKER",
+            "fungis board wait TICKET BLOCKER_TICKET / fungis board unwait TICKET BLOCKER_TICKET",
             f"- recovery: {usage['recovery']}",
             "Use role names as stable addresses. Report results and blockers through Fungis.",
             # 명령 목록만으로는 언제 쓰는지 모른다. 새 세션마다 맥락 없이
