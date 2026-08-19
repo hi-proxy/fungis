@@ -35,6 +35,15 @@ CMUX_BUNDLE_PATHS = (
 )
 
 
+def tty_exists(name: str | None) -> bool:
+    """그 tty 장치가 아직 시스템에 있나.
+
+    cmux 가 복원한 표면은 재부팅 전 tty 이름을 들고 있다. 그 이름이 /dev 에
+    없으면 낡은 메타데이터지 어긋난 짝이 아니다.
+    """
+    return bool(name) and Path("/dev", name).exists()
+
+
 def resolve_cmux(name: str = "cmux") -> str:
     """PATH를 먼저 보고, 없으면 아는 번들 자리를 본다.
 
@@ -303,6 +312,16 @@ class CmuxAdapter:
             elif surface_tty is None:
                 binding_verified = False
                 verification_reason = "surface_tty_missing"
+            elif process_tty != surface_tty and not tty_exists(surface_tty):
+                # cmux 가 복원한 표면은 재부팅 전 tty 이름을 그대로 들고 있다.
+                # 그 장치는 이제 없다. 없는 이름과 살아 있는 프로세스를 견주면
+                # 영원히 안 맞고, 그러면 깨우기가 통째로 멈춘다(8/19).
+                #
+                # 표면 id 는 멀쩡하다 — 그 id 로 read-screen 하면 지금 화면이
+                # 그대로 온다. 그리고 이 id 는 에이전트 자신의 훅이 적은 것이다.
+                # 죽은 이름표보다 그쪽이 정본이다.
+                binding_verified = True
+                verification_reason = "surface_tty_gone_hook_surface_trusted"
             elif process_tty != surface_tty:
                 binding_verified = False
                 verification_reason = "agent_tty_surface_tty_mismatch"

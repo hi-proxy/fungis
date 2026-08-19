@@ -426,3 +426,59 @@ def test_existing_binding_database_keeps_legacy_server_identity(tmp_path):
     assert registry.node_id() == "node-local"
     assert registry.pm_principal_id() == "pm-local"
     assert registry.binding("agent-old")["principal_id"] == "agent-old"
+
+
+def test_a_surface_whose_tty_device_is_gone_is_still_the_agents_terminal(tmp_path):
+    """cmux 가 복원한 표면은 재부팅 전 tty 이름을 그대로 들고 있다.
+
+    그 장치는 이제 없다. 없는 이름과 살아 있는 프로세스를 견주면 영원히 안 맞고,
+    2026-08-19 에 그것 때문에 깨우기가 통째로 멈췄다. 표면 id 는 멀쩡했다 —
+    그 id 로 읽으면 지금 화면이 그대로 왔다. 죽은 이름표보다 그쪽이 정본이다.
+    """
+    hook_store = tmp_path / "hooks"
+    hook_store.mkdir()
+    (hook_store / "claude-hook-sessions.json").write_text(json.dumps({
+        "sessions": {"agent-session": {
+            "sessionId": "agent-session", "surfaceId": "surface-uuid",
+            "cwd": "/project", "agentLifecycle": "idle", "pid": 123,
+        }}
+    }))
+
+    class RestoredCmux(FakeCmux):
+        """표면은 살아 있는데 tty 이름만 재부팅 전 것이다."""
+
+        def _run_json(self, *args):
+            tree = super()._run_json(*args)
+            surface = tree["windows"][0]["workspaces"][0]["panes"][0]["surfaces"][0]
+            surface["tty"] = "ttys99999"
+            return tree
+
+    candidate = RestoredCmux(hook_store_dir=hook_store).discover_agents()[0]
+    assert candidate.binding_verified is True
+    assert candidate.verification_reason == "surface_tty_gone_hook_surface_trusted"
+
+    # 살아 있는 tty 가 안 맞는 것은 여전히 거부한다. 검사를 없앤 것이 아니다.
+    # 어느 기계에나 있는 장치를 써야 이 판정이 기계마다 달라지지 않는다.
+    class MovedCmux(FakeCmux):
+        def _run_json(self, *args):
+            tree = super()._run_json(*args)
+            tree["windows"][0]["workspaces"][0]["panes"][0]["surfaces"][0]["tty"] = "null"
+            return tree
+
+        @staticmethod
+        def _process_tty(pid):
+            return "ttys008"
+
+    moved = MovedCmux(hook_store_dir=hook_store).discover_agents()[0]
+    assert moved.binding_verified is False
+    assert moved.verification_reason == "agent_tty_surface_tty_mismatch"
+
+
+def test_tty_exists_says_no_for_a_missing_device(tmp_path):
+    from fungis_node.cmux import tty_exists
+
+    assert not tty_exists(None)
+    assert not tty_exists("")
+    assert not tty_exists("ttys99999")
+    # 어느 기계에나 있는 장치로 참을 확인한다.
+    assert tty_exists("null")
