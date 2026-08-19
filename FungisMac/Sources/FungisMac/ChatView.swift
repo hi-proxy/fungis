@@ -466,6 +466,8 @@ private struct ChatComposer: View {
     @State private var draftTags = ""
     @State private var showMetadata = false
     @State private var mentionError: String?
+    /// 보내는 중. 같은 초안이 두 번 나가는 것을 막는다.
+    @State private var sending = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -732,6 +734,13 @@ private struct ChatComposer: View {
     }
 
     private func send() async {
+        // draft 를 비우는 것이 await 뒤라, 보내는 동안 한 번 더 들어오면 같은
+        // 초안을 다시 읽어 두 번 나간다. Enter 와 버튼이 같은 함수를 부르니
+        // 두 길 다 여기서 막는다. 2026-08-19 에 PM 이 99밀리초 간격으로 같은
+        // 메시지를 두 건 보냈다.
+        guard !sending else { return }
+        sending = true
+        defer { sending = false }
         let rawBody: String
         let targets: [String]
         let roles: [String]
