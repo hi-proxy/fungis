@@ -685,16 +685,16 @@ class FungisDB:
         room = self.project_name(workspace_id)
         if self.is_hq(workspace_id):
             return (
-                f'"{room}" 는 소집된 방의 lead 만 쓴다. 너는 지금 어느 방의 '
-                "lead 도 아니다. 네 방 lead 를 통하거나 PM 에게 요청하라."
+                f'"{room}"는 소집된 방의 lead만 쓴다. 너는 지금 어느 방의 '
+                "lead도 아니다. 네 방 lead를 통하거나 PM에게 요청하라."
             )
         mine = [item["name"] for item in self.principal_projects(principal_id)]
         if mine:
             joined = ", ".join(f'"{name}"' for name in mine)
-            return f'너는 "{room}" 소속이 아니다. 속한 프로젝트는 {joined} 이다.'
+            return f'너는 "{room}" 소속이 아니다. 속한 프로젝트는 {joined}이다.'
         return (
             f'너는 "{room}" 소속이 아니다. 속한 프로젝트가 하나도 없다. '
-            "PM 에게 배정을 요청하라."
+            "PM에게 배정을 요청하라."
         )
 
     def members(self, workspace_id: str) -> dict[str, Any]:
@@ -926,10 +926,10 @@ class FungisDB:
         if lead is not None and lead.get("agent_id") == actor_id:
             return None
         room = self.project_name(project_id)
-        head = f'"{room}" 보드는 그 방 lead 나 PM 만 쓴다.'
+        head = f'"{room}" 보드는 그 방 lead나 PM만 쓴다.'
         if lead is None or not lead.get("agent_id"):
-            return f'{head} "{room}" 에는 지금 lead 가 없다. PM 에게 요청하라.'
-        return f'{head} "{room}" lead 는 {lead["agent_name"]} 다. 그에게 부탁하라.'
+            return f'{head} "{room}"에는 지금 lead가 없다. PM에게 요청하라.'
+        return f'{head} "{room}" lead는 {lead["agent_name"]}다. 그에게 부탁하라.'
 
     def resolve_room_id(self, given: str) -> str | None:
         """방 이름·티켓 프리픽스·ID 를 방 ID 로 푼다. 아니면 None.
@@ -1706,7 +1706,7 @@ class FungisDB:
         if lead is None or not lead.get("agent_id"):
             room = self.project_name(room_id)
             raise ValueError(
-                f'"{room}" 에는 지금 lead 가 없다. PM 에게 물어라.'
+                f'"{room}"에는 지금 lead가 없다. PM에게 물어라.'
             )
         return str(lead["agent_id"])
 

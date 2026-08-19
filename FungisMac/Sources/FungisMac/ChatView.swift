@@ -68,6 +68,7 @@ struct ChatView: View {
                                             message: message, pmID: model.snapshot.pmID,
                                             pmProfile: model.snapshot.pmProfile,
                                             roles: model.snapshot.roles,
+                                            leadRooms: leadRooms,
                                             isBookmarked: bookmarkedSequences.contains(message.seq)
                                         ) {
                                             contextFilter = contextFilter == $0 ? nil : $0
@@ -204,6 +205,16 @@ struct ChatView: View {
     /// 방을 새로 만들면 무엇부터 해야 하는지가 화면에 없다. 남은 단계만
     /// 보여주고 끝나면 사라진다. 온보딩은 방마다 한 번이라 상시 UI를 바꾸는
     /// 대신 빈 상태에만 둔다.
+    /// HQ 발신자는 역할이 없어 아바타 폴백이 전원 회색 "CL"이 된다. lead 는
+    /// 자기 방을 대표해 말하는 것이므로 그 방의 아바타를 입힌다.
+    private var leadRooms: [String: String] {
+        Dictionary(
+            uniqueKeysWithValues: (model.board.candidates ?? []).compactMap { candidate in
+                candidate.lead?.agentID.map { ($0, candidate.name) }
+            }
+        )
+    }
+
     private var isHQ: Bool {
         model.snapshot.projects.first { $0.id == model.selectedProjectID }?.isHQ == true
     }
@@ -1094,6 +1105,8 @@ private struct MessageRow: View {
     let pmID: String
     let pmProfile: PMProfile
     let roles: [WorkspaceRole]
+    /// 발신자 principal id → 그가 lead 인 방 이름. HQ 타임라인에서만 실질이 있다.
+    let leadRooms: [String: String]
     let isBookmarked: Bool
     let selectContext: (String) -> Void
     let bookmark: () -> Void
@@ -1187,6 +1200,15 @@ private struct MessageRow: View {
             PMAvatar(profile: pmProfile, size: 34)
         } else if let role = senderRole {
             RoleAvatar(role: role, size: 34)
+        } else if let room = leadRooms[message.senderID] {
+            // 그 방의 lead 다. 방 아바타를 입힌다 — 누구의 말인지가 아니라
+            // 어느 방의 말인지가 HQ 에서 읽는 사람이 알고 싶은 것이다.
+            ZStack {
+                Circle().fill(roleAvatarColor(room))
+                Text(roleInitials(room))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+            }.frame(width: 34, height: 34)
         } else {
             ZStack {
                 Circle().fill(Color.secondary.opacity(0.13))

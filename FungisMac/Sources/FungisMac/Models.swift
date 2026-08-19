@@ -502,10 +502,13 @@ struct BoardTrack: Decodable, Identifiable, Hashable {
 struct BoardRole: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
+    /// 담당자 principal id. HQ 타임라인이 발신자를 lead 와 맞춰볼 때 쓴다.
+    let agentID: String?
     let agentName: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name
+        case agentID = "agent_id"
         case agentName = "agent_name"
     }
 }

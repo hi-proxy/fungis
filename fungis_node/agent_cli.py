@@ -983,9 +983,13 @@ def main() -> None:
                 for message in messages
                 if message.get("workspace_id")
             }
-            if len(rooms) == 1:
+            # HQ 로는 안 따라간다. HQ 방송은 lead 전원이 받으므로, 따라가면
+            # 방송 한 번에 모든 lead 의 활성 방이 HQ 로 뒤집힌다. 그 뒤의 맨
+            # reply 는 자기 방 대신 HQ 에 붙고 board add 는 HQ 트랙을 노린다.
+            # lead 는 자기 방에 서서 HQ 를 읽는 것이지 HQ 로 이사가는 것이 아니다.
+            if len(rooms) == 1 and (room := rooms.pop()) != "hq":
                 registry.set_state(
-                    f"active_project:{binding['principal_id']}", rooms.pop()
+                    f"active_project:{binding['principal_id']}", room
                 )
         elif args.command == "state":
             client = PMClient(

@@ -1167,7 +1167,7 @@ def test_the_board_is_read_by_everyone_but_written_by_the_lead(tmp_path):
             },
         )
         assert denied.status_code == 403
-        assert "lead 는 lead 다" in denied.json()["detail"]
+        assert "lead는 lead다" in denied.json()["detail"]
 
         node = client.post(
             "/v1/board/nodes",
@@ -1214,7 +1214,7 @@ def test_the_board_tells_you_to_ask_the_pm_when_a_room_has_no_lead(tmp_path):
             },
         )
         assert denied.status_code == 403
-        assert "lead 가 없다" in denied.json()["detail"]
+        assert "lead가 없다" in denied.json()["detail"]
         assert "PM" in denied.json()["detail"]
 
 

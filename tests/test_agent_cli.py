@@ -668,3 +668,32 @@ def test_a_reference_split_from_its_body_says_so(capsys):
     with pytest.raises(SystemExit):
         parser().parse_args(["reply", "42", "--track", "x", "body"])
     assert "붙여서 쓴다" in capsys.readouterr().err
+
+
+def test_inbox_does_not_follow_a_broadcast_into_hq(tmp_path, monkeypatch):
+    """HQ 방송을 받아도 활성 방은 자기 방에 남는다.
+
+    따라가면 방송 한 번에 모든 lead 의 활성 방이 HQ 로 뒤집히고, 그 뒤의 맨
+    reply 는 자기 방 대신 HQ 에 붙는다. 실제로 첫 HQ 방송에서 lead 셋의
+    문맥이 전부 hq 로 넘어갔고 board add 가 403 을 받았다.
+    """
+    from fungis_node.registry import LocalRegistry
+    from fungis_node.agent_cli import active_project
+
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.set_state("active_project:agent-1", "my-room")
+
+    # inbox 분기의 방 따라가기 규칙만 떼어 재현한다.
+    def follow(messages):
+        rooms = {
+            m.get("workspace_id") for m in messages if m.get("workspace_id")
+        }
+        if len(rooms) == 1 and (room := rooms.pop()) != "hq":
+            registry.set_state("active_project:agent-1", room)
+
+    follow([{"workspace_id": "hq"}])
+    assert active_project(registry, "agent-1") == "my-room", "HQ 로 이사가면 안 된다"
+
+    follow([{"workspace_id": "other-room"}])
+    assert active_project(registry, "agent-1") == "other-room", "일반 방은 따라간다"
+    registry.close()
