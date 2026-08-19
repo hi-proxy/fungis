@@ -4,6 +4,7 @@ import pytest
 
 from fungis_node.agent_cli import (
     active_project, addressing, compact_history, default_recipients, emit_inbox,
+    warn_if_nobody_received,
     format_bootstrap, legacy_hint, load_config,
     parser, read_state, render_board, render_members, render_state,
     reply_reference, resolve_project, resolve_room, stored_echo,
@@ -507,6 +508,25 @@ def test_an_unknown_to_value_goes_out_as_an_address_for_the_server_to_resolve():
     client = FakeClient(workspace_id="hq-1", roles=[])
     role_ids, direct, _, _ = addressing(client, Options(to=["ARCH"]))
     assert (role_ids, direct) == ([], ["ARCH"])
+
+
+def test_sending_to_nobody_says_so_instead_of_looking_like_success(capsys):
+    """recipient_ids 가 빈 것은 성공 출력 안에서 실패처럼 안 보인다.
+
+    한 리드가 이 자리에서 세 번 연속으로 갔다고 믿었다. 방에는 남으니
+    실패는 아니지만, 아무도 안 깨웠다는 것은 말해 줘야 안다.
+    """
+    warn_if_nobody_received({"recipient_ids": []}, [])
+    assert "아무도 받지 않았다" in capsys.readouterr().err
+
+    # 역할로 갔으면 간 것이다.
+    warn_if_nobody_received({"recipient_ids": []}, ["reviewer"])
+    # HQ 는 서버가 lead 전원으로 풀어 돌려준다.
+    warn_if_nobody_received({"recipient_ids": ["agent-1"]}, [])
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    # 어느 경우에도 stdout 은 건드리지 않는다. 거기는 JSON 한 덩어리다.
+    assert captured.out == ""
 
 
 def test_a_role_can_be_typed_the_way_the_screen_shows_it():

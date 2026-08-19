@@ -960,6 +960,24 @@ def stored_echo(
     }
 
 
+def warn_if_nobody_received(result: dict, role_ids: list[str]) -> None:
+    """아무도 안 받은 것은 성공 출력 안에서 실패처럼 보이지 않는다.
+
+    일반 방의 send 는 지목이 없으면 아무도 받지 않는다. 자리에 붙이는 쓰임이
+    실제로 있어 실패로 만들지는 않는다. 그런데 recipient_ids 가 빈 것을
+    보내는 쪽이 못 알아채서, 한 리드가 사흘 사이 세 번을 갔다고 믿었다.
+    그 자리만 말로 짚는다. HQ 는 서버가 lead 전원으로 풀어 돌려주므로
+    여기 걸리지 않는다.
+    """
+    if result.get("recipient_ids") or role_ids:
+        return
+    print(
+        "아무도 받지 않았다. 방에는 남지만 누구도 깨우지 않는다.  "
+        "받을 사람을 지목하려면 --to ROLE",
+        file=sys.stderr,
+    )
+
+
 def write_error_message(error: Exception) -> str:
     return (
         f"{error}\n"
@@ -1096,6 +1114,7 @@ def main() -> None:
                 tags=args.tag,
                 inherit_context=not args.no_inherit_context,
             )
+            warn_if_nobody_received(result, role_ids)
             print(json.dumps(
                 stored_echo(result, roles=role_ids, in_reply_to=in_reply_to),
                 ensure_ascii=False,
