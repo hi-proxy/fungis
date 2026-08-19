@@ -11,22 +11,25 @@ struct CodeSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var file: RepositoryFile?
+    @State private var painted: [AttributedString] = []
     @State private var failure: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(reference.label).font(.headline).textSelection(.enabled)
+                    .foregroundStyle(CodeColors.foreground)
                 if let file, file.truncated {
                     Text("앞 \(file.lines.count)줄만 · 전체 \(file.totalLines)줄")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(CodeColors.comment)
                 }
                 Spacer()
                 Button("닫기") { dismiss() }
             }
             .padding(14)
+            .background(CodeColors.background)
             Divider()
-            content
+            content.background(CodeColors.background)
         }
         .frame(width: 900, height: 620)
         .task { await load() }
@@ -37,14 +40,14 @@ struct CodeSheet: View {
             VStack(spacing: 10) {
                 Image(systemName: "doc.questionmark").font(.largeTitle)
                 Text(failure).font(.callout).multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(CodeColors.comment)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity).padding(30)
         } else if let file {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(file.lines.enumerated()), id: \.offset) { index, text in
+                        ForEach(Array(painted.enumerated()), id: \.offset) { index, text in
                             line(number: index + 1, text: text)
                         }
                     }.padding(.vertical, 8)
@@ -60,26 +63,32 @@ struct CodeSheet: View {
         }
     }
 
-    private func line(number: Int, text: String) -> some View {
+    private func line(number: Int, text: AttributedString) -> some View {
         let marked = number >= reference.firstLine && number <= reference.lastLine
         return HStack(alignment: .top, spacing: 10) {
             Text("\(number)")
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(marked ? CodeColors.orange : CodeColors.comment)
                 .frame(width: 52, alignment: .trailing)
-            Text(text.isEmpty ? " " : text)
+            Text(text.characters.isEmpty ? AttributedString(" ") : text)
                 .font(.system(.callout, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 12).padding(.vertical, 1)
-        .background(marked ? Color.yellow.opacity(0.18) : .clear)
+        // 짚어 준 줄은 한 단계 밝은 바탕으로 깐다. 노란 형광펜을 쓰면
+        // 어두운 바탕에서 글자가 죽는다.
+        .background(marked ? CodeColors.currentLine : .clear)
         .id(number)
     }
 
     private func load() async {
         do {
-            file = try await model.api.file(projectID: projectID, path: reference.path)
+            let seen = try await model.api.file(
+                projectID: projectID, path: reference.path
+            )
+            painted = CodeHighlighter.paint(lines: seen.lines, path: seen.path)
+            file = seen
         } catch {
             failure = error.localizedDescription
         }
