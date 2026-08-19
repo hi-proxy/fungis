@@ -1111,6 +1111,16 @@ private struct MessageRow: View {
     let selectContext: (String) -> Void
     let bookmark: () -> Void
     @State private var showPretty = true
+    /// 정형 안내문(init·lead 지정)은 기본 접힘. 매번 전문이 펼쳐져 있으면
+    /// 타임라인에서 사람 말이 밀려난다.
+    @State private var expanded = false
+
+    private static let boilerplateTags: Set<String> = [
+        "fungis-init", "onboarding", "lead-notice",
+    ]
+    private var isBoilerplate: Bool {
+        !Self.boilerplateTags.isDisjoint(with: message.tags)
+    }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 9) {
@@ -1131,7 +1141,19 @@ private struct MessageRow: View {
                 if hasContextMetadata { contextMetadata }
 
                 Group {
-                    if showPretty {
+                    if isBoilerplate && !expanded {
+                        HStack(spacing: 6) {
+                            Text(message.body.split(
+                                separator: "\n", maxSplits: 1,
+                                omittingEmptySubsequences: false
+                            ).first.map(String.init) ?? message.body)
+                                .lineLimit(1)
+                            Button("펼치기") { expanded = true }
+                                .buttonStyle(.plain).font(.caption)
+                                .foregroundStyle(.secondary)
+                                .contentShape(Rectangle())
+                        }
+                    } else if showPretty {
                         Text(MessagePrettyPrinter.prettyText(message.body, seed: message.seq))
                     } else {
                         Text(message.body)

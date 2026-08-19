@@ -474,6 +474,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                     recipient_ids=[agent_id],
                     role_ids=[],
                     body=template.format(project=change["project_name"]),
+                    # 안내문은 정형문이라 타임라인에서 기본 접힘으로 그린다.
+                    # 앱이 이 태그로 알아본다.
+                    tags=["lead-notice"],
                 )
                 for event in events:
                     await hub.publish(event)

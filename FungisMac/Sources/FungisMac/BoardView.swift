@@ -149,7 +149,7 @@ struct BoardSheet: View {
     ]
 
     private static let trackWidth: CGFloat = 150
-    private static let columnWidth: CGFloat = 260
+    private static let columnWidth: CGFloat = 300
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -165,7 +165,7 @@ struct BoardSheet: View {
             Divider()
             legend
         }
-        .frame(minWidth: 900, minHeight: 520)
+        .frame(minWidth: 1160, minHeight: 560)
         .task { await model.refreshBoard() }
         // 잡은 것을 놓는 길이 버튼 하나뿐이면 손이 갇힌다.
         .onExitCommand { linking = nil }
