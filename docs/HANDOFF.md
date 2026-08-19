@@ -1,44 +1,52 @@
 # fungis 개발 핸드오프
 
 기준일: 2026-08-19
-상태: 로컬 실사용 가능한 SwiftUI 개발 빌드. **지금은 안 뜬다 — 아래 "지금 막힌 것" 먼저.**
+상태: 로컬 실사용 가능한 SwiftUI 개발 빌드
 
 ---
 
-# 지금 막힌 것 (2026-08-19 19:40 이후)
+# 8/19 재부팅 뒤 안 뜨던 것 — 고쳤다 (`2398fc4`)
 
-맥이 크래시로 재부팅됐다. 재부팅 뒤 **fungis 가 cmux 를 못 찾아 daemon 이 안 뜬다.**
-cmux 자체는 정상이다.
+맥이 크래시로 재부팅된 뒤 **fungis 가 cmux 를 못 찾아 daemon 이 안 떴다.**
+cmux 자체는 정상이었다.
 
-## 원인 후보 1순위 — PATH
+## 원인 — 앱이 받는 PATH
 
-`demo.py:151` 이 `shutil.which("cmux")` 로 PATH 를 본다.
-
-```python
-if shutil.which(CmuxAdapter().executable) is None:
-    raise RuntimeError("cmux를 PATH에서 못 찾았다. ...")
-```
-
-실측한 cmux 위치는 이렇다.
+cmux 실행 파일은 앱 번들 안에 있다.
 
 ```
 /Applications/cmux.app/Contents/Resources/bin/cmux
 ```
 
-**앱 번들 안이라 기본 PATH 에 없다.** 셸에서는 프로필이 넣어 줘서 보이지만,
-Finder 나 로그인 항목으로 뜬 GUI 앱은 최소 PATH(`/usr/bin:/bin:/usr/sbin:/sbin`)만
-받는다. 그러면 이 검사가 걸리고 daemon 이 뜨기 전에 죽는다.
+셸은 프로필이 PATH 에 넣어 줘서 보이지만, Finder 나 로그인 항목으로 뜬 GUI 앱은
+최소 PATH(`/usr/bin:/bin:/usr/sbin:/sbin`)만 물려받는다. **이 daemon 을 띄우는
+것이 그 앱이다.** 재부팅 전에 됐던 것은 그때 앱이 셸에서 떴거나 daemon 이 이미
+살아 있었기 때문이고, 재부팅이 그 우연을 지웠다.
 
-재부팅 전에 됐던 이유는 그때 앱이 셸에서 떴거나 daemon 이 이미 살아 있었기
-때문일 가능성이 크다. **재부팅이 그 우연을 지웠다.**
+## 고친 방식
 
-- **확인법**: 앱을 셸에서 띄워 본다. `open FungisMac/build/Fungis.app` 말고
-  실행 파일을 직접 — 셸 PATH 를 물려받으면 뜬다는 것이 확인되면 원인 확정이다
-- **고치는 법(약 2줄)**: PATH 만 믿지 말고 앱 번들 경로를 폴백으로 둔다.
-  `shutil.which` 실패 시 `/Applications/cmux.app/Contents/Resources/bin/cmux`
-  존재를 확인한다. 이 검사 자체는 지우지 않는다 — "초록불인데 아무것도 안 되는
-  상태"를 막으려고 일부러 넣은 것이다
-- **아직 안 고쳤다.** 크래시 조사 중에 변수를 늘리지 않으려고 놔뒀다. PM 판단 대기
+`CmuxAdapter`가 생성 시점에 한 번 푼다 — PATH 다음에 아는 번들 자리
+(`resolve_cmux`, `cmux.py`).
+
+**검사만 고치면 안 된다.** 어댑터가 `self.executable` 로 cmux 를 부르는 자리가
+여섯이라, 시작 검사만 통과시키면 실제 호출에서 죽는다. 그게 이 검사가 애초에
+막으려던 "초록불인데 아무것도 안 되는 상태"다.
+
+못 찾으면 이름을 그대로 돌려준다. **조용히 성공시키지 않는다** — 시작 검사가
+지금처럼 걸려서 죽어야 한다.
+
+## 검증 — 실패하던 그 환경으로
+
+```
+$ env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin ...
+최소 PATH 에서 which: None
+resolve_cmux()      : /Applications/cmux.app/Contents/Resources/bin/cmux
+어댑터가 든 값      : /Applications/cmux.app/Contents/Resources/bin/cmux
+discover_agents()   : 에이전트 6개 발견
+```
+
+검사 통과만 본 것이 아니라 **그 경로로 cmux 를 실제로 불러 에이전트를 찾는
+것까지** 확인했다. `pytest 175`.
 
 ## 크래시가 fungis 탓인가 — 지금까지 나온 것
 
@@ -120,7 +128,7 @@ fungis 는 이때 떠 있지도 않았다. **Logitech Options+ 와 WindowServer 
 2. **보조인력이 `r2`(티켓 경계)를 승인할 수 있나.** `r3` 는 소유자로 둘 생각이다
 3. **보조인력이 맥인가 윈도우인가.** 맥이면 오늘 구조로 붙고, 윈도우면 앱이
    SwiftUI 라 화면이 없는 것이 벽이라 M1 인증이 선행이다
-4. **cmux PATH 폴백을 넣을지** — 위 "지금 막힌 것" 참고
+4. ~~cmux PATH 폴백~~ — 넣었다 (`2398fc4`)
 
 ## 미보고
 
@@ -140,7 +148,7 @@ fungis 는 이때 떠 있지도 않았다. **Logitech Options+ 와 WindowServer 
 
 - 원격 저장소: `git@github.com:hi-proxy/fungis.git`
 - 기준 branch: `cross-project`
-- 구현 기준 commit: `6e6c351` (`fix: say when a message reached nobody`)
+- 구현 기준 commit: `2398fc4` (`fix: find cmux when the app's PATH does not have it`)
 
 ### 브랜치 운용
 
