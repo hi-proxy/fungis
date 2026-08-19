@@ -5,12 +5,81 @@
 
 ---
 
-# 8/19 재부팅 뒤 안 뜨던 것 — 고쳤다 (`2398fc4`)
+# 8/19 재부팅 뒤 안 뜨던 것 — 고쳤다
 
-맥이 크래시로 재부팅된 뒤 **fungis 가 cmux 를 못 찾아 daemon 이 안 떴다.**
-cmux 자체는 정상이었다.
+**벽이 둘이었다.** 앞의 것을 고쳐도 뒤의 것이 남아 있어서 여전히 안 됐다.
 
-## 원인 — 앱이 받는 PATH
+| | 벽 | 어디를 고쳤나 |
+|---|---|---|
+| 1 | daemon 이 cmux 실행 파일을 못 찾는다 | fungis 코드 (`2398fc4`) |
+| 2 | 찾아도 cmux 소켓이 daemon 을 거부한다 | **cmux 설정** (저장소 밖) |
+
+---
+
+## 벽 2 — cmux 소켓이 daemon 을 거부한다 (이게 진짜였다)
+
+```
+$ curl http://127.0.0.1:8790/api/state
+{"detail":"Error: ERROR: Access denied - only processes started inside cmux can connect"}
+```
+
+cmux 는 유닉스 소켓으로 조종하고 접근을 모드로 가른다. 공식 스키마 기준:
+
+```
+automation.socketControlMode
+  enum     off · cmuxOnly · automation · password · allowAll ·
+           openAccess · fullOpenAccess · notifications · full
+  default  "cmuxOnly"
+automation.socketPassword   default ""
+```
+
+**기본값 `cmuxOnly` 는 cmux 안에서 시작된 프로세스만 붙게 한다.**
+`fungis-node daemon` 은 `Fungis.app` 이 띄운다 — cmux 자손이 아니라 거부된다.
+에러 문구가 이 모드를 그대로 말한다.
+
+### 고친 방식 — `~/.config/cmux/cmux.json` (fungis 코드 변경 0)
+
+```jsonc
+"automation": {
+  "socketControlMode": "password",
+  "socketPassword": "1234"
+}
+```
+
+cmux CLI 가 `--password` → `CMUX_SOCKET_PASSWORD` → **Settings 에 저장된 값**
+순으로 찾는다. 마지막 폴백 덕분에 daemon 이 아무 환경변수 없이도 붙는다.
+반영은 `cmux reload-config` (앱 재시작 불필요).
+
+**값이 하나 있다**: 이 기계의 다른 로컬 프로세스도 이 파일을 읽으면 cmux 를
+조종할 수 있다. PM 이 알고 고른 것이다. 비밀번호는 임시값이다.
+
+### 여기서 크게 헤맸다 — 검증이 무효였던 이유
+
+벽 1 을 고치고 "정상화 끝났다"고 보고했는데 **틀렸다.** 검증을 내 셸에서 했고
+**내 셸은 cmux 안에 있다.** 그래서 `discover_agents()` 가 에이전트 6개를 찾았다.
+
+`env -i` 로 환경변수는 지웠지만 **프로세스 혈통은 못 지운다.** 앱이 띄운 daemon 은
+`Fungis.app` 자손이라 같은 코드가 거부당했다.
+
+> **cmux 를 건드리는 것은 이 저장소 안에서 검증할 수 없다.**
+> 반드시 도는 daemon 에 물어야 한다 — `curl http://127.0.0.1:8790/api/state`.
+> 여기 `agents` 가 차 있으면 진짜 통과한 것이다.
+
+### 확인한 것
+
+```
+$ curl http://127.0.0.1:8790/api/state
+에이전트 6개 — claude ttys100/026/015/016/102/104
+$ curl http://127.0.0.1:8790/health
+{"status":"ok","sends_wakes":true,"stale":false}
+$ fungis board        20 tickets, 5 waiting
+```
+
+---
+
+## 벽 1 — daemon 이 cmux 실행 파일을 못 찾는다 (`2398fc4`)
+
+### 원인 — 앱이 받는 PATH
 
 cmux 실행 파일은 앱 번들 안에 있다.
 
@@ -23,7 +92,7 @@ cmux 실행 파일은 앱 번들 안에 있다.
 것이 그 앱이다.** 재부팅 전에 됐던 것은 그때 앱이 셸에서 떴거나 daemon 이 이미
 살아 있었기 때문이고, 재부팅이 그 우연을 지웠다.
 
-## 고친 방식
+### 고친 방식
 
 `CmuxAdapter`가 생성 시점에 한 번 푼다 — PATH 다음에 아는 번들 자리
 (`resolve_cmux`, `cmux.py`).
@@ -35,7 +104,7 @@ cmux 실행 파일은 앱 번들 안에 있다.
 못 찾으면 이름을 그대로 돌려준다. **조용히 성공시키지 않는다** — 시작 검사가
 지금처럼 걸려서 죽어야 한다.
 
-## 검증 — 실패하던 그 환경으로
+### 검증 — 실패하던 그 환경으로
 
 ```
 $ env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin ...
