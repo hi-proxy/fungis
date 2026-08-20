@@ -117,20 +117,75 @@ import Testing
     await client.stop()
 }
 
+private actor ApprovalRecorder {
+    private(set) var requests: [HostedApprovalRequest] = []
+    func record(_ request: HostedApprovalRequest) { requests.append(request) }
+}
+
+@Test func installedCodexRelaysAnOutOfWorkspaceApprovalRequest() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_APPROVAL_TEST"] == "1" else {
+        return
+    }
+    let client = CodexAppServerClient()
+    let recorder = ApprovalRecorder()
+    let identity = HostedAgentIdentity(
+        principalID: "agent-hosted-approval-test", projectID: "project-approval-test"
+    )
+    do {
+        try await client.configure(identity: identity)
+        await client.configureApprovalHandler { request in
+            await recorder.record(request)
+            return .deny
+        }
+        _ = try await client.start()
+        let workspace = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let threadID = try await client.startThread(cwd: workspace.path)
+        let answer = try await client.runTurn(
+            threadID: threadID,
+            text: """
+            Run exactly this command once: /usr/bin/curl -I https://example.com. \
+            Do not use another tool. If permission is denied, just say DENIED_OK.
+            """
+        )
+        let requests = await recorder.requests
+        if requests.isEmpty {
+            throw HostedAgentError.rpc("승인 요청 없이 끝난 실제 turn: \(answer)")
+        }
+        #expect(requests.count == 1)
+        #expect(requests.first?.kind == .command)
+        #expect(requests.first?.command?.contains("example.com") == true)
+    } catch {
+        await client.stop()
+        throw error
+    }
+    await client.stop()
+}
+
 private actor FakeHostedProviderClient: HostedAgentProviderClient {
     let threadID: String
     private(set) var identity: HostedAgentIdentity?
     private(set) var stopped = false
+    private var approvalHandler: HostedApprovalHandler?
 
     init(threadID: String) { self.threadID = threadID }
 
     func configure(identity: HostedAgentIdentity) async throws { self.identity = identity }
+    func configureApprovalHandler(_ handler: @escaping HostedApprovalHandler) async {
+        approvalHandler = handler
+    }
     func start() async throws -> HostedAgentAccount { accountValue }
     func account() async throws -> HostedAgentAccount { accountValue }
     func beginChatGPTLogin() async throws -> URL { URL(string: "https://example.com/login")! }
     func startThread(cwd: String) async throws -> String { threadID }
     func runTurn(threadID: String, text: String) async throws -> String { "" }
     func stop() async { stopped = true }
+
+    func askForApproval(_ request: HostedApprovalRequest) async -> HostedApprovalDecision {
+        await approvalHandler?(request) ?? .cancel
+    }
 
     private var accountValue: HostedAgentAccount {
         HostedAgentAccount(
@@ -165,6 +220,8 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     private(set) var connected: [String] = []
     private(set) var disconnected: [String] = []
     private(set) var assignments: [(roleID: String, agentID: String)] = []
+    private(set) var createdApprovals: [HostedApprovalRequest] = []
+    private(set) var resolvedApprovals: [(String, String, String?)] = []
 
     func assignRole(id: String, agentID: String, sendOnboarding: Bool) async throws {
         assignments.append((id, agentID))
@@ -186,6 +243,38 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     ) async throws {}
 
     func ackHosted(principalID: String, through: Int) async throws {}
+
+    func createHostedPermission(_ approval: HostedApprovalRequest) async throws -> String {
+        createdApprovals.append(approval)
+        return "audit-\(createdApprovals.count)"
+    }
+
+    func resolvePermission(
+        requestID: String, projectID: String, status: String,
+        decision: String?, decisionScope: String?
+    ) async throws {
+        resolvedApprovals.append((requestID, status, decisionScope))
+    }
+}
+
+@Test func codexApprovalRequestKeepsExactCommandAndBoundary() throws {
+    let request = try HostedApprovalRequest.decode(
+        method: "item/commandExecution/requestApproval", requestID: .integer(42),
+        params: [
+            "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
+            "reason": "needs network", "command": ["curl", "https://example.com"],
+            "cwd": "/tmp/project",
+            "networkApprovalContext": ["host": "example.com", "protocol": "https"],
+            "availableDecisions": ["accept", "acceptForSession", "decline"],
+        ],
+        identity: HostedAgentIdentity(principalID: "agent-1", projectID: "project-1")
+    )
+
+    #expect(request.kind == .command)
+    #expect(request.command == "curl https://example.com")
+    #expect(request.cwd == "/tmp/project")
+    #expect(request.network == "example.com · https")
+    #expect(request.providerRequestID == .integer(42))
 }
 
 @MainActor
@@ -225,4 +314,40 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     #expect(!secondStopped)
 
     await coordinator.stop(second)
+}
+
+@MainActor
+@Test func hostedApprovalWaitsForPMAndReturnsSessionDecision() async throws {
+    let factory = FakeHostedProviderFactory()
+    let api = FakeHostedAgentAPI()
+    let coordinator = HostedAgentCoordinator(makeCodexClient: { factory.make() }, api: api)
+    coordinator.approvalTimeoutMinutes = 0
+    let session = try await coordinator.createAndAssign(
+        provider: .codex, cwd: "/tmp/project", projectID: "project-1",
+        roleID: "role-1", sendOnboarding: false
+    )
+    let approval = try HostedApprovalRequest.decode(
+        method: "item/fileChange/requestApproval", requestID: .integer(7),
+        params: [
+            "threadId": session.providerSessionID, "turnId": "turn-1",
+            "itemId": "item-1", "grantRoot": "/outside/project",
+        ],
+        identity: HostedAgentIdentity(
+            principalID: session.principalID, projectID: session.projectID
+        )
+    )
+    let decisionTask = Task {
+        await factory.client(at: 0).askForApproval(approval)
+    }
+    for _ in 0..<100 where coordinator.pendingApprovals.isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let pending = try #require(coordinator.pendingApprovals.first)
+    #expect(pending.path == "/outside/project")
+    #expect(pending.auditID == "audit-1")
+    coordinator.resolve(pending, as: .allowSession)
+    #expect(await decisionTask.value == .allowSession)
+    #expect(coordinator.pendingApprovals.isEmpty)
+    await coordinator.stop(session)
 }

@@ -218,6 +218,12 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             tool_name=payload.tool_name,
             tool_input=payload.tool_input,
             suggestions=payload.suggestions,
+            source=payload.source,
+            request_kind=payload.request_kind,
+            provider_request_id=payload.provider_request_id,
+            thread_id=payload.thread_id,
+            turn_id=payload.turn_id,
+            available_decisions=payload.available_decisions,
         )
 
     @app.get("/v1/permission-requests/{request_id}")
@@ -233,6 +239,8 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             request_id=request_id,
             status=payload.status,
             resolved_by=payload.resolved_by,
+            decision=payload.decision,
+            decision_scope=payload.decision_scope,
         )
         if found is None:
             raise HTTPException(status_code=404, detail="permission request not found")

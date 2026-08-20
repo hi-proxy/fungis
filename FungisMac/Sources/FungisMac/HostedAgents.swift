@@ -156,12 +156,126 @@ struct HostedExecutableResolver {
 
 protocol HostedAgentProviderClient: Sendable {
     func configure(identity: HostedAgentIdentity) async throws
+    func configureApprovalHandler(_ handler: @escaping HostedApprovalHandler) async
     func start() async throws -> HostedAgentAccount
     func account() async throws -> HostedAgentAccount
     func beginChatGPTLogin() async throws -> URL
     func startThread(cwd: String) async throws -> String
     func runTurn(threadID: String, text: String) async throws -> String
     func stop() async
+}
+
+typealias HostedApprovalHandler = @Sendable (HostedApprovalRequest) async -> HostedApprovalDecision
+
+enum HostedApprovalKind: String, Sendable {
+    case command, fileChange, permissions
+
+    var title: String {
+        switch self {
+        case .command: "명령 실행"
+        case .fileChange: "파일 변경"
+        case .permissions: "추가 권한"
+        }
+    }
+}
+
+enum HostedApprovalDecision: String, Sendable {
+    case allowOnce, allowSession, deny, cancel
+
+    var wireDecision: String {
+        switch self {
+        case .allowOnce: "accept"
+        case .allowSession: "acceptForSession"
+        case .deny: "decline"
+        case .cancel: "cancel"
+        }
+    }
+
+    var status: String { self == .allowOnce || self == .allowSession ? "allowed" : "denied" }
+    var scope: String? { self == .allowSession ? "session" : self == .allowOnce ? "turn" : nil }
+}
+
+struct HostedApprovalRequest: Identifiable, Equatable, Sendable {
+    let id: String
+    let providerRequestID: HostedProviderRequestID
+    let principalID: String
+    let projectID: String
+    let kind: HostedApprovalKind
+    let method: String
+    let threadID: String?
+    let turnID: String?
+    let itemID: String?
+    let reason: String?
+    let command: String?
+    let cwd: String?
+    let path: String?
+    let network: String?
+    let detailJSON: String
+    let requestedPermissionsJSON: String?
+    let availableDecisions: [String]
+    var auditID: String?
+
+    var sessionLabel: String { String(principalID.suffix(8)) }
+
+    static func decode(
+        method: String, requestID: HostedProviderRequestID, params: [String: Any],
+        identity: HostedAgentIdentity
+    ) throws -> HostedApprovalRequest {
+        let kind: HostedApprovalKind
+        switch method {
+        case "item/commandExecution/requestApproval": kind = .command
+        case "item/fileChange/requestApproval": kind = .fileChange
+        case "item/permissions/requestApproval": kind = .permissions
+        default: throw HostedAgentError.invalidResponse
+        }
+        let data = try JSONSerialization.data(withJSONObject: params, options: [.sortedKeys])
+        let detail = String(data: data, encoding: .utf8) ?? "{}"
+        let command: String?
+        if let parts = params["command"] as? [String] {
+            command = parts.joined(separator: " ")
+        } else {
+            command = params["command"] as? String
+        }
+        var network: String?
+        if let context = params["networkApprovalContext"] as? [String: Any] {
+            network = [context["host"], context["protocol"]]
+                .compactMap { $0 as? String }.joined(separator: " · ")
+            if network?.isEmpty == true { network = nil }
+        }
+        let permissionsJSON: String?
+        if let permissions = params["permissions"] {
+            let value = try JSONSerialization.data(withJSONObject: permissions, options: [.sortedKeys])
+            permissionsJSON = String(data: value, encoding: .utf8)
+        } else {
+            permissionsJSON = nil
+        }
+        return HostedApprovalRequest(
+            id: UUID().uuidString, providerRequestID: requestID,
+            principalID: identity.principalID, projectID: identity.projectID,
+            kind: kind, method: method,
+            threadID: params["threadId"] as? String,
+            turnID: params["turnId"] as? String,
+            itemID: params["itemId"] as? String,
+            reason: params["reason"] as? String, command: command,
+            cwd: params["cwd"] as? String, path: params["grantRoot"] as? String,
+            network: network,
+            detailJSON: detail, requestedPermissionsJSON: permissionsJSON,
+            availableDecisions: params["availableDecisions"] as? [String] ?? [],
+            auditID: nil
+        )
+    }
+}
+
+enum HostedProviderRequestID: Equatable, Sendable {
+    case integer(Int)
+    case string(String)
+
+    var auditValue: String {
+        switch self {
+        case let .integer(value): String(value)
+        case let .string(value): value
+        }
+    }
 }
 
 struct HostedAgentIdentity: Equatable, Sendable {
@@ -209,6 +323,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
     private var initialized = false
     private let stderrBuffer = TextBuffer()
     private var identity: HostedAgentIdentity?
+    private var approvalHandler: HostedApprovalHandler?
 
     init(executableURL: URL? = HostedExecutableResolver.codexURL()) {
         self.executableURL = executableURL
@@ -221,6 +336,10 @@ actor CodexAppServerClient: HostedAgentProviderClient {
             )
         }
         self.identity = identity
+    }
+
+    func configureApprovalHandler(_ handler: @escaping HostedApprovalHandler) async {
+        approvalHandler = handler
     }
 
     func start() async throws -> HostedAgentAccount {
@@ -307,7 +426,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
             method: "thread/start",
             params: [
                 "cwd": cwd,
-                "approvalPolicy": "never",
+                "approvalPolicy": "untrusted",
                 "sandbox": "workspace-write",
                 "ephemeral": false,
             ]
@@ -334,6 +453,20 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         var answer = ""
         while true {
             let message = try readMessage()
+            if let method = message["method"] as? String,
+               method.hasSuffix("/requestApproval"),
+               let params = message["params"] as? [String: Any] {
+                let requestID: HostedProviderRequestID
+                if let value = message["id"] as? NSNumber {
+                    requestID = .integer(value.intValue)
+                } else if let value = message["id"] as? String {
+                    requestID = .string(value)
+                } else {
+                    throw HostedAgentError.invalidResponse
+                }
+                try await answerApproval(method: method, requestID: requestID, params: params)
+                continue
+            }
             guard let method = message["method"] as? String,
                   let params = message["params"] as? [String: Any] else { continue }
             if method == "item/agentMessage/delta",
@@ -353,6 +486,39 @@ actor CodexAppServerClient: HostedAgentProviderClient {
                 return answer.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
+    }
+
+    private func answerApproval(
+        method: String, requestID: HostedProviderRequestID, params: [String: Any]
+    ) async throws {
+        guard let identity else { throw HostedAgentError.invalidResponse }
+        let request = try HostedApprovalRequest.decode(
+            method: method, requestID: requestID, params: params, identity: identity
+        )
+        let decision = await approvalHandler?(request) ?? .deny
+        let result: [String: Any]
+        if request.kind == .permissions {
+            let permissions: Any
+            if decision == .allowOnce || decision == .allowSession,
+               let json = request.requestedPermissionsJSON,
+               let data = json.data(using: .utf8) {
+                permissions = try JSONSerialization.jsonObject(with: data)
+            } else {
+                permissions = [String: Any]()
+            }
+            result = [
+                "permissions": permissions,
+                "scope": decision == .allowSession ? "session" : "turn",
+            ]
+        } else {
+            result = ["decision": decision.wireDecision]
+        }
+        let wireID: Any
+        switch requestID {
+        case let .integer(value): wireID = value
+        case let .string(value): wireID = value
+        }
+        try write(["id": wireID, "result": result])
     }
 
     func stop() async {
@@ -443,6 +609,11 @@ protocol HostedAgentAPIClient: Sendable {
         body: String, inReplyToProjectSeq: Int
     ) async throws
     func ackHosted(principalID: String, through: Int) async throws
+    func createHostedPermission(_ approval: HostedApprovalRequest) async throws -> String
+    func resolvePermission(
+        requestID: String, projectID: String, status: String,
+        decision: String?, decisionScope: String?
+    ) async throws
 }
 
 extension FungisAPI: HostedAgentAPIClient {}
@@ -451,10 +622,20 @@ extension FungisAPI: HostedAgentAPIClient {}
 final class HostedAgentCoordinator: ObservableObject {
     @Published private(set) var creationState: HostedAgentConnectionState = .stopped
     @Published private(set) var sessions: [HostedAgentSession] = []
+    @Published private(set) var pendingApprovals: [HostedApprovalRequest] = []
+    @Published private(set) var presentedApproval: HostedApprovalRequest?
+    @Published var approvalTimeoutMinutes: Int {
+        didSet { UserDefaults.standard.set(approvalTimeoutMinutes, forKey: Self.timeoutKey) }
+    }
     private let makeCodexClient: @Sendable () -> any HostedAgentProviderClient
     private var clients: [String: any HostedAgentProviderClient] = [:]
     private var inboxTasks: [String: Task<Void, Never>] = [:]
+    private var approvalWaiters: [
+        String: CheckedContinuation<HostedApprovalDecision, Never>
+    ] = [:]
+    private var approvalTimeoutTasks: [String: Task<Void, Never>] = [:]
     private let api: any HostedAgentAPIClient
+    private static let timeoutKey = "hostedApprovalTimeoutMinutes"
 
     init(
         makeCodexClient: @escaping @Sendable () -> any HostedAgentProviderClient = {
@@ -464,6 +645,7 @@ final class HostedAgentCoordinator: ObservableObject {
     ) {
         self.makeCodexClient = makeCodexClient
         self.api = api
+        approvalTimeoutMinutes = UserDefaults.standard.integer(forKey: Self.timeoutKey)
     }
 
     func createAndAssign(
@@ -482,6 +664,10 @@ final class HostedAgentCoordinator: ObservableObject {
         let client = makeCodexClient()
         do {
             try await client.configure(identity: identity)
+            await client.configureApprovalHandler { [weak self] approval in
+                guard let self else { return .cancel }
+                return await self.waitForApproval(approval)
+            }
             var account = try await client.start()
             if !account.authentication.isChatGPT {
                 creationState = .waitingForLogin
@@ -536,12 +722,65 @@ final class HostedAgentCoordinator: ObservableObject {
     }
 
     func stop(_ session: HostedAgentSession) async {
+        cancelApprovals(for: session.principalID)
         inboxTasks.removeValue(forKey: session.id)?.cancel()
         try? await api.disconnectHostedSession(session.principalID)
         if let client = clients.removeValue(forKey: session.id) {
             await client.stop()
         }
         sessions.removeAll { $0.id == session.id }
+    }
+
+    func showNextApproval() {
+        if presentedApproval == nil { presentedApproval = pendingApprovals.first }
+    }
+
+    func postponePresentedApproval() {
+        presentedApproval = nil
+    }
+
+    func resolve(_ approval: HostedApprovalRequest, as decision: HostedApprovalDecision) {
+        guard pendingApprovals.contains(where: { $0.id == approval.id }) else { return }
+        approvalTimeoutTasks.removeValue(forKey: approval.id)?.cancel()
+        pendingApprovals.removeAll { $0.id == approval.id }
+        if presentedApproval?.id == approval.id { presentedApproval = nil }
+        approvalWaiters.removeValue(forKey: approval.id)?.resume(returning: decision)
+        if let auditID = approval.auditID {
+            Task { [api] in
+                try? await api.resolvePermission(
+                    requestID: auditID, projectID: approval.projectID,
+                    status: decision.status, decision: decision.rawValue,
+                    decisionScope: decision.scope
+                )
+            }
+        }
+        showNextApproval()
+    }
+
+    private func waitForApproval(
+        _ incoming: HostedApprovalRequest
+    ) async -> HostedApprovalDecision {
+        var approval = incoming
+        approval.auditID = try? await api.createHostedPermission(incoming)
+        return await withCheckedContinuation { continuation in
+            approvalWaiters[approval.id] = continuation
+            pendingApprovals.append(approval)
+            if presentedApproval == nil { presentedApproval = approval }
+            if approvalTimeoutMinutes > 0 {
+                let minutes = approvalTimeoutMinutes
+                approvalTimeoutTasks[approval.id] = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(minutes * 60))
+                    guard !Task.isCancelled else { return }
+                    self?.resolve(approval, as: .deny)
+                }
+            }
+        }
+    }
+
+    private func cancelApprovals(for principalID: String) {
+        for approval in pendingApprovals where approval.principalID == principalID {
+            resolve(approval, as: .cancel)
+        }
     }
 
     func assign(

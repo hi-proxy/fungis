@@ -208,6 +208,21 @@ class MessagePayload(BaseModel):
 class PermissionDecision(BaseModel):
     project_id: str = "local"
     status: str = Field(pattern="^(allowed|denied)$")
+    decision: str | None = Field(default=None, max_length=80)
+    decision_scope: str | None = Field(default=None, pattern="^(turn|session)$")
+
+
+class HostedPermissionPayload(BaseModel):
+    project_id: str = "local"
+    session_id: str = Field(min_length=1)
+    agent_id: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1, max_length=120)
+    tool_input: str = Field(max_length=20000)
+    request_kind: str = Field(min_length=1, max_length=80)
+    provider_request_id: str | None = Field(default=None, max_length=120)
+    thread_id: str | None = Field(default=None, max_length=200)
+    turn_id: str | None = Field(default=None, max_length=200)
+    available_decisions: str | None = Field(default=None, max_length=20000)
 
 
 class RolePayload(BaseModel):
@@ -912,7 +927,21 @@ def create_web_app(
     def resolve_permission(request_id: str, payload: PermissionDecision) -> dict:
         with client(payload.project_id) as pm:
             return pm.resolve_permission_request(
-                request_id, payload.status, resolved_by=str(pm.pm_id)
+                request_id, payload.status, resolved_by=str(pm.pm_id),
+                decision=payload.decision, decision_scope=payload.decision_scope,
+            )
+
+    @app.post("/api/permission-requests", status_code=201)
+    def create_hosted_permission(payload: HostedPermissionPayload) -> dict:
+        with client(payload.project_id) as pm:
+            return pm.create_permission_request(
+                session_id=payload.session_id, agent_id=payload.agent_id,
+                tool_name=payload.tool_name, tool_input=payload.tool_input,
+                suggestions=None, source="hosted_appserver",
+                request_kind=payload.request_kind,
+                provider_request_id=payload.provider_request_id,
+                thread_id=payload.thread_id, turn_id=payload.turn_id,
+                available_decisions=payload.available_decisions,
             )
 
     @app.get("/api/projects/{project_id}/file")

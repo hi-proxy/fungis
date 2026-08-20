@@ -105,6 +105,7 @@ struct ContentView: View {
             if accessing { url.stopAccessingSecurityScopedResource() }
             Task { _ = await model.setProjectRepository(projectID: project.id, path: path) }
         }
+        .background(HostedApprovalPresenter(coordinator: model.hostedAgents))
     }
 
     private func projectButton(_ project: FungisProject) -> some View {
@@ -167,6 +168,7 @@ struct ContentView: View {
     private var statusBar: some View {
         VStack(spacing: 0) {
             Divider()
+            HostedApprovalBadge(coordinator: model.hostedAgents)
             Button {
                 showAgents = true
             } label: {

@@ -20,14 +20,51 @@ struct FungisAPI: Sendable {
     }
 
     func resolvePermission(
-        requestID: String, projectID: String, status: String
+        requestID: String, projectID: String, status: String,
+        decision: String? = nil, decisionScope: String? = nil
     ) async throws {
-        struct Payload: Encodable { let project_id: String; let status: String }
+        struct Payload: Encodable {
+            let project_id: String
+            let status: String
+            let decision: String?
+            let decision_scope: String?
+        }
         let _: EmptyResponse = try await request(
             "api/permission-requests/\(encoded(requestID))/resolve", method: "POST",
-            body: Payload(project_id: projectID, status: status),
+            body: Payload(
+                project_id: projectID, status: status, decision: decision,
+                decision_scope: decisionScope
+            ),
             acceptsAnyObject: true
         )
+    }
+
+    func createHostedPermission(_ approval: HostedApprovalRequest) async throws -> String {
+        struct Payload: Encodable {
+            let project_id: String
+            let session_id: String
+            let agent_id: String
+            let tool_name: String
+            let tool_input: String
+            let request_kind: String
+            let provider_request_id: String
+            let thread_id: String?
+            let turn_id: String?
+            let available_decisions: String
+        }
+        struct Created: Decodable { let id: String }
+        let created: Created = try await request(
+            "api/permission-requests", method: "POST",
+            body: Payload(
+                project_id: approval.projectID, session_id: approval.threadID ?? approval.principalID,
+                agent_id: approval.principalID, tool_name: approval.kind.title,
+                tool_input: approval.detailJSON, request_kind: approval.kind.rawValue,
+                provider_request_id: approval.providerRequestID.auditValue,
+                thread_id: approval.threadID, turn_id: approval.turnID,
+                available_decisions: approval.availableDecisions.joined(separator: ",")
+            )
+        )
+        return created.id
     }
 
     func state(projectID: String = "local") async throws -> FungisSnapshot {

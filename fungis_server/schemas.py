@@ -115,11 +115,19 @@ class PermissionRequestCreate(BaseModel):
     tool_name: str = Field(min_length=1, max_length=120)
     tool_input: str = Field(max_length=20000)
     suggestions: str | None = Field(default=None, max_length=20000)
+    source: Literal["terminal_hook", "hosted_appserver"] = "terminal_hook"
+    request_kind: str | None = Field(default=None, max_length=80)
+    provider_request_id: str | None = Field(default=None, max_length=120)
+    thread_id: str | None = Field(default=None, max_length=200)
+    turn_id: str | None = Field(default=None, max_length=200)
+    available_decisions: str | None = Field(default=None, max_length=20000)
 
 
 class PermissionResolve(BaseModel):
     status: str = Field(pattern="^(allowed|denied|expired)$")
     resolved_by: str | None = None
+    decision: str | None = Field(default=None, max_length=80)
+    decision_scope: str | None = Field(default=None, pattern="^(turn|session)$")
 
 
 class BoardLink(BaseModel):

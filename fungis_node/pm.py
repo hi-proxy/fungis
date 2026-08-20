@@ -630,7 +630,10 @@ class PMClient:
 
     def create_permission_request(
         self, *, session_id: str, agent_id: str | None, tool_name: str,
-        tool_input: str, suggestions: str | None,
+        tool_input: str, suggestions: str | None, source: str = "terminal_hook",
+        request_kind: str | None = None, provider_request_id: str | None = None,
+        thread_id: str | None = None, turn_id: str | None = None,
+        available_decisions: str | None = None,
     ) -> dict:
         result = self._request("POST", "/v1/permission-requests", {
             "workspace_id": self.workspace_id,
@@ -639,6 +642,12 @@ class PMClient:
             "tool_name": tool_name,
             "tool_input": tool_input,
             "suggestions": suggestions,
+            "source": source,
+            "request_kind": request_kind,
+            "provider_request_id": provider_request_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "available_decisions": available_decisions,
         })
         assert isinstance(result, dict)
         return result
@@ -651,11 +660,15 @@ class PMClient:
         return result
 
     def resolve_permission_request(
-        self, request_id: str, status: str, resolved_by: str | None = None
+        self, request_id: str, status: str, resolved_by: str | None = None,
+        decision: str | None = None, decision_scope: str | None = None,
     ) -> dict:
         result = self._request(
             "PATCH", f"/v1/permission-requests/{urllib.parse.quote(request_id)}",
-            {"status": status, "resolved_by": resolved_by},
+            {
+                "status": status, "resolved_by": resolved_by,
+                "decision": decision, "decision_scope": decision_scope,
+            },
         )
         assert isinstance(result, dict)
         return result

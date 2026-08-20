@@ -89,6 +89,82 @@ def test_stale_pending_requests_stop_showing_as_cards(tmp_path, monkeypatch):
         ).json()["status"] == "expired"
 
 
+def test_hosted_request_waits_without_terminal_ttl_and_records_scope(tmp_path, monkeypatch):
+    from fungis_server import db as db_module
+
+    with TestClient(create_app(tmp_path / "hosted-perm.db")) as client:
+        client.post(
+            "/v1/principals",
+            json={"id": "agent-hosted-1", "kind": "agent", "display_name": "Hosted 1"},
+        )
+        created = client.post(
+            "/v1/permission-requests",
+            json={
+                "workspace_id": "local",
+                "session_id": "thread-1",
+                "agent_id": "agent-hosted-1",
+                "tool_name": "command",
+                "tool_input": json.dumps({"command": ["curl", "example.com"]}),
+                "source": "hosted_appserver",
+                "request_kind": "command",
+                "provider_request_id": "42",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "available_decisions": "accept,acceptForSession,decline",
+            },
+        ).json()
+
+        monkeypatch.setattr(db_module, "PERMISSION_REQUEST_TTL_SECONDS", 0)
+        pending = client.get("/v1/workspaces/local/permission-requests").json()
+        assert [item["id"] for item in pending] == [created["id"]]
+
+        resolved = client.patch(
+            f"/v1/permission-requests/{created['id']}",
+            json={
+                "status": "allowed",
+                "decision": "allowSession",
+                "decision_scope": "session",
+            },
+        ).json()
+        assert resolved["decision"] == "allowSession"
+        assert resolved["decision_scope"] == "session"
+
+
+def test_detaching_hosted_agent_cancels_its_pending_requests(tmp_path):
+    with TestClient(create_app(tmp_path / "hosted-detach.db")) as client:
+        client.post(
+            "/v1/principals",
+            json={"id": "agent-hosted-2", "kind": "agent", "display_name": "Hosted 2"},
+        )
+        client.put(
+            "/v1/nodes/fungis-app",
+            json={"id": "fungis-app", "display_name": "Fungis App"},
+        )
+        client.put(
+            "/v1/bindings/agent-hosted-2",
+            json={
+                "agent_id": "agent-hosted-2", "node_id": "fungis-app",
+                "agent_provider": "codex", "agent_session_id": "thread-2",
+                "terminal_provider": "fungis-app", "terminal_session_id": "thread-2",
+                "lifecycle": "running",
+            },
+        )
+        created = client.post(
+            "/v1/permission-requests",
+            json={
+                "workspace_id": "local", "session_id": "thread-2",
+                "agent_id": "agent-hosted-2", "tool_name": "fileChange",
+                "tool_input": "{}", "source": "hosted_appserver",
+                "request_kind": "fileChange",
+            },
+        ).json()
+
+        assert client.delete("/v1/bindings/agent-hosted-2").status_code == 204
+        closed = client.get(f"/v1/permission-requests/{created['id']}").json()
+        assert closed["status"] == "expired"
+        assert closed["decision"] == "cancel"
+
+
 def test_gate_never_holds_the_terminal(tmp_path, monkeypatch):
     """이 hook은 권한 화면이 뜨기 전에 돈다. 여기서 기다리면 질문조차 안 뜬다.
 

@@ -105,6 +105,14 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     tool_name TEXT NOT NULL,
     tool_input TEXT NOT NULL,
     suggestions TEXT,
+    source TEXT NOT NULL DEFAULT 'terminal_hook',
+    request_kind TEXT,
+    provider_request_id TEXT,
+    thread_id TEXT,
+    turn_id TEXT,
+    available_decisions TEXT,
+    decision TEXT,
+    decision_scope TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'allowed', 'denied', 'expired')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -303,6 +311,25 @@ class FungisDB:
             self._migrate()
 
     def _migrate(self) -> None:
+        permission_columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(permission_requests)")
+        }
+        permission_additions = {
+            "source": "TEXT NOT NULL DEFAULT 'terminal_hook'",
+            "request_kind": "TEXT",
+            "provider_request_id": "TEXT",
+            "thread_id": "TEXT",
+            "turn_id": "TEXT",
+            "available_decisions": "TEXT",
+            "decision": "TEXT",
+            "decision_scope": "TEXT",
+        }
+        for name, declaration in permission_additions.items():
+            if name not in permission_columns:
+                self._connection.execute(
+                    f"ALTER TABLE permission_requests ADD COLUMN {name} {declaration}"
+                )
         columns = {
             row["name"]
             for row in self._connection.execute("PRAGMA table_info(messages)")
@@ -597,17 +624,22 @@ class FungisDB:
     def create_permission_request(
         self, *, workspace_id: str, session_id: str, agent_id: str | None,
         tool_name: str, tool_input: str, suggestions: str | None,
+        source: str = "terminal_hook", request_kind: str | None = None,
+        provider_request_id: str | None = None, thread_id: str | None = None,
+        turn_id: str | None = None, available_decisions: str | None = None,
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO permission_requests(
                        id, workspace_id, session_id, agent_id,
-                       tool_name, tool_input, suggestions
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       tool_name, tool_input, suggestions, source, request_kind,
+                       provider_request_id, thread_id, turn_id, available_decisions
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     request_id, workspace_id, session_id, agent_id,
-                    tool_name, tool_input, suggestions,
+                    tool_name, tool_input, suggestions, source, request_kind,
+                    provider_request_id, thread_id, turn_id, available_decisions,
                 ),
             )
             row = conn.execute(
@@ -636,6 +668,7 @@ class FungisDB:
                 """UPDATE permission_requests SET status = 'expired',
                      resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                    WHERE workspace_id = ? AND status = 'pending'
+                     AND source != 'hosted_appserver'
                      AND created_at < strftime(
                        '%Y-%m-%dT%H:%M:%fZ', 'now', ?
                      )""",
@@ -654,6 +687,7 @@ class FungisDB:
 
     def resolve_permission_request(
         self, *, request_id: str, status: str, resolved_by: str | None,
+        decision: str | None = None, decision_scope: str | None = None,
     ) -> dict[str, Any] | None:
         if status not in ("allowed", "denied", "expired"):
             raise ValueError(f"unknown status: {status}")
@@ -664,9 +698,9 @@ class FungisDB:
                 """UPDATE permission_requests
                    SET status = ?,
                        resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                       resolved_by = ?
+                       resolved_by = ?, decision = ?, decision_scope = ?
                    WHERE id = ? AND status = 'pending'""",
-                (status, resolved_by, request_id),
+                (status, resolved_by, decision, decision_scope, request_id),
             )
             row = conn.execute(
                 "SELECT * FROM permission_requests WHERE id = ?", (request_id,)
@@ -1515,6 +1549,14 @@ class FungisDB:
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE agent_id = ? AND attached = 1
                 """,
+                (agent_id,),
+            )
+            conn.execute(
+                """UPDATE permission_requests
+                   SET status = 'expired', decision = 'cancel',
+                       resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                   WHERE agent_id = ? AND source = 'hosted_appserver'
+                     AND status = 'pending'""",
                 (agent_id,),
             )
         return cursor.rowcount == 1
