@@ -102,7 +102,10 @@ struct RolesView: View {
         .sheet(item: $assigningRole) { role in
             AssignmentEditor(
                 role: role, agents: model.snapshot.agents,
-                coordinator: model.hostedAgents, roles: model.snapshot.roles
+                coordinator: model.hostedAgents, roles: model.snapshot.roles,
+                projectWorkspacePath: model.snapshot.projectRepositories.first {
+                    $0.projectID == model.selectedProjectID
+                }?.path
             ) { surfaceID, onboarding in
                 if await model.connectAndAssign(
                     roleID: role.id, surfaceID: surfaceID, sendOnboarding: onboarding
@@ -113,12 +116,9 @@ struct RolesView: View {
                 if await model.assignHosted(
                     roleID: role.id, session: session, sendOnboarding: onboarding
                 ) { assigningRole = nil }
-            } createHosted: { provider, onboarding in
+            } createHosted: { provider, cwd, onboarding in
                 if await model.createHostedAndAssign(
-                    provider: provider, roleID: role.id,
-                    cwd: model.snapshot.projectRepositories.first {
-                        $0.projectID == model.selectedProjectID
-                    }?.path ?? FileManager.default.currentDirectoryPath,
+                    provider: provider, roleID: role.id, cwd: cwd,
                     sendOnboarding: onboarding
                 ) { assigningRole = nil }
             } stopHosted: { session in
@@ -327,9 +327,10 @@ private struct AssignmentEditor: View {
     let agents: [AgentTerminal]
     @ObservedObject var coordinator: HostedAgentCoordinator
     let roles: [WorkspaceRole]
+    let projectWorkspacePath: String?
     let assign: (String, Bool) async -> Void
     let assignHosted: (HostedAgentSession, Bool) async -> Void
-    let createHosted: (HostedAgentProviderID, Bool) async -> Void
+    let createHosted: (HostedAgentProviderID, String, Bool) async -> Void
     let stopHosted: (HostedAgentSession) async -> Void
     @State private var surfaceID: String
     @State private var hostedPrincipalID: String
@@ -338,19 +339,23 @@ private struct AssignmentEditor: View {
     @State private var confirmReassignment = false
     @State private var stoppingSession: HostedAgentSession?
     @State private var creationTask: Task<Void, Never>?
+    @State private var workspacePath: String
+    @State private var choosingWorkspace = false
 
     init(
         role: WorkspaceRole, agents: [AgentTerminal],
         coordinator: HostedAgentCoordinator, roles: [WorkspaceRole],
+        projectWorkspacePath: String?,
         assign: @escaping (String, Bool) async -> Void,
         assignHosted: @escaping (HostedAgentSession, Bool) async -> Void,
-        createHosted: @escaping (HostedAgentProviderID, Bool) async -> Void,
+        createHosted: @escaping (HostedAgentProviderID, String, Bool) async -> Void,
         stopHosted: @escaping (HostedAgentSession) async -> Void
     ) {
         self.role = role
         self.agents = agents
         self.coordinator = coordinator
         self.roles = roles
+        self.projectWorkspacePath = projectWorkspacePath
         self.assign = assign
         self.assignHosted = assignHosted
         self.createHosted = createHosted
@@ -365,6 +370,7 @@ private struct AssignmentEditor: View {
         )
         _hostedPrincipalID = State(initialValue: currentHosted?.principalID ?? "")
         _newProvider = State(initialValue: nil)
+        _workspacePath = State(initialValue: projectWorkspacePath ?? "")
         // 역할 설명이 비어 있다고 꺼두면 배정 init이 통째로 안 나간다. 그러면
         // 에이전트는 자기가 배정된 줄도 모르고 PM은 보냈다고 믿는다. 설명 유무는
         // 덧붙일 문구가 있느냐일 뿐, 부를지 말지가 아니다.
@@ -419,6 +425,15 @@ private struct AssignmentEditor: View {
             } message: {
                 Text("The provider process stops. Any role assignment remains as SESSION OFFLINE.")
             }
+            .fileImporter(
+                isPresented: $choosingWorkspace,
+                allowedContentTypes: [.folder], allowsMultipleSelection: false
+            ) { result in
+                guard case let .success(urls) = result, let url = urls.first else { return }
+                let accessing = url.startAccessingSecurityScopedResource()
+                workspacePath = url.path
+                if accessing { url.stopAccessingSecurityScopedResource() }
+            }
             .onDisappear { creationTask?.cancel() }
     }
 
@@ -446,6 +461,7 @@ private struct AssignmentEditor: View {
             ForEach(HostedAgentProviderID.allCases) { provider in
                 newHostedSessionRow(provider)
             }
+            if newProvider != nil { workspaceSelection }
             switch coordinator.creationState {
             case .starting:
                 Label("app-server 시작 중…", systemImage: "hourglass")
@@ -537,6 +553,7 @@ private struct AssignmentEditor: View {
             newProvider = provider
             hostedPrincipalID = ""
             surfaceID = ""
+            if validWorkspacePath == nil { choosingWorkspace = true }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: newProvider == provider
@@ -556,6 +573,28 @@ private struct AssignmentEditor: View {
         .buttonStyle(.plain)
         .disabled(!provider.isAvailable || creationInProgress)
         .opacity(provider.isAvailable ? 1 : 0.45)
+    }
+
+    private var workspaceSelection: some View {
+        HStack(spacing: 10) {
+            Image(systemName: validWorkspacePath == nil
+                  ? "folder.badge.questionmark" : "folder.fill")
+                .foregroundStyle(validWorkspacePath == nil ? .orange : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(validWorkspacePath ?? "Workspace 폴더를 선택하세요")
+                    .font(.caption).lineLimit(2).textSelection(.enabled)
+                if projectWorkspacePath == nil {
+                    Text("이 프로젝트에는 지정된 workspace가 없습니다.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if validWorkspacePath == nil {
+                    Text("지정된 workspace 경로를 사용할 수 없습니다.")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            Button("Choose…") { choosingWorkspace = true }
+        }
+        .padding(10)
     }
 
     private func displayName(_ agent: AgentTerminal) -> String {
@@ -590,6 +629,7 @@ private struct AssignmentEditor: View {
         }.buttonStyle(.borderedProminent)
             .disabled(
                 (surfaceID.isEmpty && hostedPrincipalID.isEmpty && newProvider == nil)
+                    || (newProvider != nil && validWorkspacePath == nil)
                     || creationInProgress
             )
     }
@@ -626,12 +666,19 @@ private struct AssignmentEditor: View {
 
     private func performAssignment() {
         if let newProvider {
-            creationTask = Task { await createHosted(newProvider, sendOnboarding) }
+            guard let validWorkspacePath else { choosingWorkspace = true; return }
+            creationTask = Task {
+                await createHosted(newProvider, validWorkspacePath, sendOnboarding)
+            }
         } else if let session = selectedHostedSession {
             Task { await assignHosted(session, sendOnboarding) }
         } else {
             Task { await assign(surfaceID, sendOnboarding) }
         }
+    }
+
+    private var validWorkspacePath: String? {
+        HostedWorkspaceDirectory.validatedPath(workspacePath)
     }
 
     private func hostedAssignedRole(_ session: HostedAgentSession) -> WorkspaceRole? {

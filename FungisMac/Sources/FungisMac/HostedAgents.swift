@@ -113,6 +113,7 @@ enum HostedAgentError: LocalizedError, Sendable {
     case invalidResponse
     case rpc(String)
     case missingLoginURL
+    case invalidWorkspace
 
     var errorDescription: String? {
         switch self {
@@ -125,7 +126,28 @@ enum HostedAgentError: LocalizedError, Sendable {
         case let .rpc(message): message
         case .missingLoginURL:
             "Codex app-server가 로그인 주소를 보내지 않았습니다."
+        case .invalidWorkspace:
+            "Hosted session에 사용할 유효한 workspace 폴더를 선택하세요."
         }
+    }
+}
+
+enum HostedWorkspaceDirectory {
+    static func validatedPath(
+        _ path: String?, fileManager: FileManager = .default
+    ) -> String? {
+        guard let path else { return nil }
+        let expanded = NSString(string: path).expandingTildeInPath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !expanded.isEmpty else { return nil }
+        let standardized = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        guard standardized != "/" else { return nil }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: standardized, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              fileManager.isReadableFile(atPath: standardized)
+        else { return nil }
+        return standardized
     }
 }
 
@@ -654,6 +676,9 @@ final class HostedAgentCoordinator: ObservableObject {
     ) async throws -> HostedAgentSession {
         guard provider == .codex else {
             throw HostedAgentError.rpc("Claude Code hosted session은 아직 지원하지 않습니다.")
+        }
+        guard let cwd = HostedWorkspaceDirectory.validatedPath(cwd) else {
+            throw HostedAgentError.invalidWorkspace
         }
 
         creationState = .starting

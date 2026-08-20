@@ -49,6 +49,19 @@ import Testing
     #expect(found == executable)
 }
 
+@Test func hostedWorkspaceRequiresARealNonRootDirectory() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    #expect(HostedWorkspaceDirectory.validatedPath(nil) == nil)
+    #expect(HostedWorkspaceDirectory.validatedPath("") == nil)
+    #expect(HostedWorkspaceDirectory.validatedPath("/") == nil)
+    #expect(HostedWorkspaceDirectory.validatedPath(directory.path) == directory.path)
+    #expect(HostedWorkspaceDirectory.validatedPath(directory.appending(path: "missing").path) == nil)
+}
+
 @Test func installedCodexAppServerReportsChatGPTSubscription() async throws {
     guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_HOST_TEST"] == "1" else {
         return
@@ -286,11 +299,13 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     )
 
     let first = try await coordinator.createAndAssign(
-        provider: .codex, cwd: "/tmp/project", projectID: "project-1",
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1",
         roleID: "role-1", sendOnboarding: true
     )
     let second = try await coordinator.createAndAssign(
-        provider: .codex, cwd: "/tmp/project", projectID: "project-1",
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1",
         roleID: "role-2", sendOnboarding: false
     )
 
@@ -323,7 +338,8 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     let coordinator = HostedAgentCoordinator(makeCodexClient: { factory.make() }, api: api)
     coordinator.approvalTimeoutMinutes = 0
     let session = try await coordinator.createAndAssign(
-        provider: .codex, cwd: "/tmp/project", projectID: "project-1",
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1",
         roleID: "role-1", sendOnboarding: false
     )
     let approval = try HostedApprovalRequest.decode(
