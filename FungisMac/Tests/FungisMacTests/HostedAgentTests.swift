@@ -86,3 +86,33 @@ import Testing
     }
     await client.stop()
 }
+
+@Test func installedCodexToolsReceiveOnlyTheirHostedFungisIdentity() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_IDENTITY_TEST"] == "1" else {
+        return
+    }
+    let client = CodexAppServerClient()
+    let identity = HostedAgentIdentity(
+        principalID: "agent-hosted-identity-test", projectID: "project-identity-test"
+    )
+    do {
+        try await client.configure(identity: identity)
+        _ = try await client.start()
+        let threadID = try await client.startThread(
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+        let answer = try await client.runTurn(
+            threadID: threadID,
+            text: """
+            Run /usr/bin/printenv FUNGIS_HOSTED_PRINCIPAL_ID and then \
+            /usr/bin/printenv FUNGIS_HOSTED_PROJECT_ID. Do not run any other command. \
+            Reply with exactly the two values joined by a vertical bar.
+            """
+        )
+        #expect(answer == "agent-hosted-identity-test|project-identity-test")
+    } catch {
+        await client.stop()
+        throw error
+    }
+    await client.stop()
+}

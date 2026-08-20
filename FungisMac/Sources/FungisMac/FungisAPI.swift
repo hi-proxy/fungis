@@ -263,13 +263,15 @@ struct FungisAPI: Sendable {
             let provider: String
             let session_id: String
             let host_pid: Int32
+            let project_id: String
         }
         let _: EmptyResponse = try await request(
             "api/hosted-sessions/\(encoded(session.principalID))", method: "PUT",
             body: Payload(
                 local_name: session.localName, principal_id: session.principalID,
                 provider: session.provider.rawValue, session_id: session.providerSessionID,
-                host_pid: ProcessInfo.processInfo.processIdentifier
+                host_pid: ProcessInfo.processInfo.processIdentifier,
+                project_id: session.projectID
             ), acceptsAnyObject: true
         )
     }

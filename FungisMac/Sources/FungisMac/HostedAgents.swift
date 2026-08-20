@@ -155,6 +155,7 @@ struct HostedExecutableResolver {
 }
 
 protocol HostedAgentProviderClient: Sendable {
+    func configure(identity: HostedAgentIdentity) async throws
     func start() async throws -> HostedAgentAccount
     func account() async throws -> HostedAgentAccount
     func beginChatGPTLogin() async throws -> URL
@@ -163,12 +164,18 @@ protocol HostedAgentProviderClient: Sendable {
     func stop() async
 }
 
+struct HostedAgentIdentity: Equatable, Sendable {
+    let principalID: String
+    let projectID: String
+}
+
 struct HostedAgentSession: Identifiable, Equatable, Sendable {
     let principalID: String
     let localName: String
     let provider: HostedAgentProviderID
     let providerSessionID: String
     let cwd: String
+    let projectID: String
     var id: String { principalID }
 }
 
@@ -201,9 +208,19 @@ actor CodexAppServerClient: HostedAgentProviderClient {
     private var nextRequestID = 1
     private var initialized = false
     private let stderrBuffer = TextBuffer()
+    private var identity: HostedAgentIdentity?
 
     init(executableURL: URL? = HostedExecutableResolver.codexURL()) {
         self.executableURL = executableURL
+    }
+
+    func configure(identity: HostedAgentIdentity) async throws {
+        if process?.isRunning == true, self.identity != identity {
+            throw HostedAgentError.rpc(
+                "실행 중인 Codex app-server의 hosted identity는 바꿀 수 없습니다."
+            )
+        }
+        self.identity = identity
     }
 
     func start() async throws -> HostedAgentAccount {
@@ -219,6 +236,18 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         let stderrPipe = Pipe()
         process.executableURL = executableURL
         process.arguments = ["app-server"]
+        if let identity {
+            var environment = ProcessInfo.processInfo.environment
+            environment["FUNGIS_HOSTED_PRINCIPAL_ID"] = identity.principalID
+            environment["FUNGIS_HOSTED_PROJECT_ID"] = identity.projectID
+            process.environment = environment
+            process.arguments? += [
+                "-c",
+                "shell_environment_policy.set.FUNGIS_HOSTED_PRINCIPAL_ID=\"\(identity.principalID)\"",
+                "-c",
+                "shell_environment_policy.set.FUNGIS_HOSTED_PROJECT_ID=\"\(identity.projectID)\"",
+            ]
+        }
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -412,35 +441,64 @@ final class HostedAgentCoordinator: ObservableObject {
     private var loginPollingTask: Task<Void, Never>?
     private var inboxTasks: [String: Task<Void, Never>] = [:]
     private let api = FungisAPI()
+    private var pendingIdentity: HostedAgentIdentity?
 
     init(codex: any HostedAgentProviderClient = CodexAppServerClient()) {
         self.codex = codex
     }
 
-    func startCodex(cwd: String) async {
+    func startCodex(cwd: String, projectID: String) async {
         codexState = .starting
         do {
+            if let existing = sessions.first, existing.projectID != projectID {
+                throw HostedAgentError.rpc(
+                    "다른 프로젝트의 hosted Codex가 실행 중입니다. 먼저 Stop 하세요."
+                )
+            }
+            if let pendingIdentity, pendingIdentity.projectID != projectID {
+                throw HostedAgentError.rpc(
+                    "다른 프로젝트의 hosted Codex가 준비 중입니다. 먼저 Stop 하세요."
+                )
+            }
+            let identity = pendingIdentity ?? sessions.first.map {
+                HostedAgentIdentity(principalID: $0.principalID, projectID: $0.projectID)
+            } ?? HostedAgentIdentity(
+                principalID: "agent-hosted-codex-\(UUID().uuidString.lowercased())",
+                projectID: projectID
+            )
+            pendingIdentity = identity
+            try await codex.configure(identity: identity)
             let account = try await codex.start()
             codexState = .ready(account)
-            if account.authentication.isChatGPT { try await prepareCodexSession(cwd: cwd) }
-        } catch {
-            codexState = .failed(error.localizedDescription)
-        }
-    }
-
-    func refreshCodexAccount(cwd: String? = nil) async {
-        do {
-            let account = try await codex.account()
-            codexState = .ready(account)
-            if account.authentication.isChatGPT, let cwd {
-                try await prepareCodexSession(cwd: cwd)
+            if account.authentication.isChatGPT {
+                try await prepareCodexSession(cwd: cwd, identity: identity)
             }
         } catch {
             codexState = .failed(error.localizedDescription)
         }
     }
 
-    func beginCodexLogin(cwd: String) async {
+    func refreshCodexAccount(cwd: String? = nil, projectID: String? = nil) async {
+        do {
+            let account = try await codex.account()
+            codexState = .ready(account)
+            if account.authentication.isChatGPT, let cwd, let projectID {
+                let identity = pendingIdentity ?? sessions.first.map {
+                    HostedAgentIdentity(principalID: $0.principalID, projectID: $0.projectID)
+                } ?? HostedAgentIdentity(
+                    principalID: "agent-hosted-codex-\(UUID().uuidString.lowercased())",
+                    projectID: projectID
+                )
+                pendingIdentity = identity
+                try await codex.configure(identity: identity)
+                try await prepareCodexSession(cwd: cwd, identity: identity)
+            }
+        } catch {
+            codexState = .failed(error.localizedDescription)
+        }
+    }
+
+    func beginCodexLogin(cwd: String, projectID: String) async {
         do {
             let url = try await codex.beginChatGPTLogin()
             codexState = .waitingForLogin
@@ -455,7 +513,14 @@ final class HostedAgentCoordinator: ObservableObject {
                         let account = try await self.codex.account()
                         if account.authentication.isChatGPT {
                             self.codexState = .ready(account)
-                            try await self.prepareCodexSession(cwd: cwd)
+                            guard let identity = self.pendingIdentity ?? self.sessions.first.map({
+                                HostedAgentIdentity(
+                                    principalID: $0.principalID, projectID: $0.projectID
+                                )
+                            }) else {
+                                throw HostedAgentError.rpc("hosted identity가 없습니다.")
+                            }
+                            try await self.prepareCodexSession(cwd: cwd, identity: identity)
                             return
                         }
                     } catch {
@@ -478,6 +543,7 @@ final class HostedAgentCoordinator: ObservableObject {
         inboxTasks.removeAll()
         for session in sessions { try? await api.disconnectHostedSession(session.principalID) }
         sessions.removeAll()
+        pendingIdentity = nil
         codexState = .stopped
     }
 
@@ -491,14 +557,19 @@ final class HostedAgentCoordinator: ObservableObject {
         startInbox(session: session, projectID: projectID)
     }
 
-    private func prepareCodexSession(cwd: String) async throws {
+    private func prepareCodexSession(
+        cwd: String, identity: HostedAgentIdentity
+    ) async throws {
         if sessions.contains(where: { $0.provider == .codex && $0.cwd == cwd }) { return }
+        if !sessions.isEmpty {
+            throw HostedAgentError.rpc("Codex app-server 하나에는 hosted session 하나만 둡니다.")
+        }
         let threadID = try await codex.startThread(cwd: cwd)
         let suffix = String(threadID.prefix(8))
         let session = HostedAgentSession(
-            principalID: "agent-hosted-codex-\(threadID)",
+            principalID: identity.principalID,
             localName: "codex-hosted-\(suffix)", provider: .codex,
-            providerSessionID: threadID, cwd: cwd
+            providerSessionID: threadID, cwd: cwd, projectID: identity.projectID
         )
         try await api.connectHostedSession(session)
         sessions.append(session)

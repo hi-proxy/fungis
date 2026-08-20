@@ -63,6 +63,18 @@ def load_config(path: Path | None = None) -> dict:
 
 
 def current_binding(registry: LocalRegistry, adapter: CmuxAdapter) -> dict:
+    hosted_principal = os.environ.get("FUNGIS_HOSTED_PRINCIPAL_ID")
+    if hosted_principal:
+        binding = registry.binding_for_principal(hosted_principal)
+        if binding is None:
+            raise RuntimeError("hosted Fungis identity is not registered")
+        try:
+            data = json.loads(binding.get("data_json") or "{}")
+        except json.JSONDecodeError as error:
+            raise RuntimeError("hosted Fungis identity is invalid") from error
+        if not data.get("hosted"):
+            raise RuntimeError("Fungis hosted identity points to a terminal session")
+        return binding
     context_surface = adapter.current_surface_id()
     if context_surface:
         direct = registry.binding_for_surface(context_surface)
@@ -549,6 +561,11 @@ def permission_clear(
 
 
 def active_project(registry: LocalRegistry, principal_id: str) -> str:
+    if (
+        os.environ.get("FUNGIS_HOSTED_PRINCIPAL_ID") == principal_id
+        and (hosted_project := os.environ.get("FUNGIS_HOSTED_PROJECT_ID"))
+    ):
+        return hosted_project
     return registry.state(f"active_project:{principal_id}") or "local"
 
 

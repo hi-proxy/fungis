@@ -251,6 +251,7 @@ class HostedSessionPayload(BaseModel):
     provider: str = Field(min_length=1, max_length=80)
     session_id: str = Field(min_length=1, max_length=200)
     host_pid: int = Field(gt=0)
+    project_id: str = Field(min_length=1)
 
 
 class HostedReplyPayload(BaseModel):
@@ -788,6 +789,9 @@ def create_web_app(
                 binding = pm.registry.attach_hosted(
                     payload.local_name, payload.principal_id,
                     payload.provider, payload.session_id, payload.host_pid,
+                )
+                pm.registry.set_state(
+                    f"active_project:{payload.principal_id}", payload.project_id
                 )
                 pm.sync_connections()
                 discovery_cache["expires_at"] = 0.0

@@ -3,6 +3,7 @@ import SwiftUI
 struct HostedAgentSheet: View {
     let role: WorkspaceRole
     let cwd: String
+    let projectID: String
     @ObservedObject var coordinator: HostedAgentCoordinator
     @Environment(\.dismiss) private var dismiss
 
@@ -75,7 +76,7 @@ struct HostedAgentSheet: View {
         switch coordinator.codexState {
         case .stopped, .failed:
             Button("Start Codex app-server", systemImage: "play.fill") {
-                Task { await coordinator.startCodex(cwd: cwd) }
+                Task { await coordinator.startCodex(cwd: cwd, projectID: projectID) }
             }
             .buttonStyle(.borderedProminent)
         case .starting:
@@ -87,13 +88,19 @@ struct HostedAgentSheet: View {
                         .foregroundStyle(.green)
                 } else {
                     Button("Sign in with ChatGPT", systemImage: "person.crop.circle.badge.checkmark") {
-                        Task { await coordinator.beginCodexLogin(cwd: cwd) }
+                        Task {
+                            await coordinator.beginCodexLogin(cwd: cwd, projectID: projectID)
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                 }
                 Spacer()
                 Button("Refresh") {
-                    Task { await coordinator.refreshCodexAccount(cwd: cwd) }
+                    Task {
+                        await coordinator.refreshCodexAccount(
+                            cwd: cwd, projectID: projectID
+                        )
+                    }
                 }
                 Button("Stop") { Task { await coordinator.stopCodex() } }
             }

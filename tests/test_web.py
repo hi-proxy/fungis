@@ -286,10 +286,16 @@ def test_hosted_session_can_be_assigned_process_inbox_and_reply(tmp_path, monkey
                     "provider": "codex",
                     "session_id": "thread-1",
                     "host_pid": os.getpid(),
+                    "project_id": "local",
                 },
             )
             assert hosted.status_code == 200
             assert hosted.json()["principal_id"] == "agent-hosted-codex-1"
+            registry = LocalRegistry(tmp_path / "node.db")
+            assert registry.state(
+                "active_project:agent-hosted-codex-1"
+            ) == "local"
+            registry.close()
 
             role = client.post(
                 "/api/roles", json={"name": "hosted", "onboarding_prompt": ""}

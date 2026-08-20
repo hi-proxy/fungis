@@ -4,6 +4,7 @@ import pytest
 
 from fungis_node.agent_cli import (
     active_project, addressing, compact_history, default_recipients, emit_inbox,
+    current_binding,
     warn_if_nobody_received,
     format_bootstrap, legacy_hint, load_config,
     parser, read_state, render_board, render_members, render_state,
@@ -119,6 +120,29 @@ def test_active_project_defaults_and_persists_per_agent(tmp_path):
     registry.set_state("active_project:agent-a", "project-2")
     assert active_project(registry, "agent-a") == "project-2"
     assert active_project(registry, "agent-b") == "local"
+    registry.close()
+
+
+def test_hosted_identity_never_falls_back_to_current_cmux_surface(
+    tmp_path, monkeypatch
+):
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach_hosted(
+        "codex-hosted", "agent-hosted", "codex", "thread-1", 123
+    )
+    registry.set_state("active_project:agent-terminal", "fungis")
+    monkeypatch.setenv("FUNGIS_HOSTED_PRINCIPAL_ID", "agent-hosted")
+    monkeypatch.setenv("FUNGIS_HOSTED_PROJECT_ID", "hosted-room")
+
+    class MustNotInspectCmux:
+        def current_surface_id(self):
+            raise AssertionError("hosted identity inspected cmux")
+
+    binding = current_binding(registry, MustNotInspectCmux())
+    assert binding["principal_id"] == "agent-hosted"
+    assert active_project(registry, "agent-hosted") == "hosted-room"
+    registry.set_state("active_project:agent-hosted", "hosted-room")
+    assert registry.state("active_project:agent-terminal") == "fungis"
     registry.close()
 
 

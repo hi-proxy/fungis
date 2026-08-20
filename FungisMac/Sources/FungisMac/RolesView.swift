@@ -126,6 +126,7 @@ struct RolesView: View {
                 cwd: model.snapshot.projectRepositories.first {
                     $0.projectID == model.selectedProjectID
                 }?.path ?? FileManager.default.currentDirectoryPath,
+                projectID: model.selectedProjectID,
                 coordinator: model.hostedAgents
             )
         }
