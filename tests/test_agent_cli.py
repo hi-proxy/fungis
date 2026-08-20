@@ -194,6 +194,8 @@ def test_inbox_stdout_is_one_pure_json_document_and_guidance_is_stderr(capsys):
     }
     assert captured.out.count("\n") == 1
     assert "Reply with:" not in captured.out
+    assert "Act on each for_me=true, later=false message" in captured.err
+    assert "do not merely print this output" in captured.err
     assert "Reply with:" in captured.err
     assert "fungis history 20" in captured.err
     assert "copied" not in captured.err

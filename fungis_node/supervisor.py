@@ -87,7 +87,10 @@ class NodeSupervisor:
                 registry,
                 self.cmux,
                 settle_seconds=self.settle_seconds,
-                wake_text="[fungis] inbox — run: fungis inbox",
+                wake_text=(
+                    "[fungis] Run fungis inbox, then act on messages for you "
+                    "before ending this turn."
+                ),
             )
             gate.refresh(recipient_id)
             binding = registry.binding(recipient_id)

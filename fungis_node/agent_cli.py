@@ -594,6 +594,11 @@ def emit_inbox(messages: list[dict]) -> None:
     }
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     if messages:
+        print(
+            "Act on each for_me=true, later=false message before ending this "
+            "turn; do not merely print this output.",
+            file=sys.stderr,
+        )
         print('Reply with: fungis reply "YOUR MESSAGE"', file=sys.stderr)
         if any(message.get("is_later") for message in messages):
             print(

@@ -116,7 +116,11 @@ def test_supervisor_wake_contains_only_short_stable_command(tmp_path):
     )
     supervisor._run_gate(registry, "agent-1")
     assert cmux.wakes == [
-        ("surface-1", "[fungis] inbox — run: fungis inbox")
+        (
+            "surface-1",
+            "[fungis] Run fungis inbox, then act on messages for you before "
+            "ending this turn.",
+        )
     ]
     registry.close()
 
