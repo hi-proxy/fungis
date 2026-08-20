@@ -7,7 +7,6 @@ struct RolesView: View {
     @State private var editingRole: WorkspaceRole?
     @State private var assigningRole: WorkspaceRole?
     @State private var historyRole: WorkspaceRole?
-    @State private var hostingRole: WorkspaceRole?
     @State private var deletingRole: WorkspaceRole?
     @State private var editingPM = false
     @State private var showConvene = false
@@ -103,8 +102,7 @@ struct RolesView: View {
         .sheet(item: $assigningRole) { role in
             AssignmentEditor(
                 role: role, agents: model.snapshot.agents,
-                hostedSessions: model.hostedAgents.sessions,
-                roles: model.snapshot.roles
+                coordinator: model.hostedAgents, roles: model.snapshot.roles
             ) { surfaceID, onboarding in
                 if await model.connectAndAssign(
                     roleID: role.id, surfaceID: surfaceID, sendOnboarding: onboarding
@@ -115,20 +113,20 @@ struct RolesView: View {
                 if await model.assignHosted(
                     roleID: role.id, session: session, sendOnboarding: onboarding
                 ) { assigningRole = nil }
+            } createHosted: { provider, onboarding in
+                if await model.createHostedAndAssign(
+                    provider: provider, roleID: role.id,
+                    cwd: model.snapshot.projectRepositories.first {
+                        $0.projectID == model.selectedProjectID
+                    }?.path ?? FileManager.default.currentDirectoryPath,
+                    sendOnboarding: onboarding
+                ) { assigningRole = nil }
+            } stopHosted: { session in
+                await model.stopHosted(session)
             }
         }
         .sheet(item: $historyRole) { role in
             AssignmentHistoryView(role: role)
-        }
-        .sheet(item: $hostingRole) { role in
-            HostedAgentSheet(
-                role: role,
-                cwd: model.snapshot.projectRepositories.first {
-                    $0.projectID == model.selectedProjectID
-                }?.path ?? FileManager.default.currentDirectoryPath,
-                projectID: model.selectedProjectID,
-                coordinator: model.hostedAgents
-            )
         }
         .sheet(isPresented: $editingPM) { PMProfileEditor() }
         .confirmationDialog(
@@ -191,12 +189,7 @@ struct RolesView: View {
             }
             Divider()
             HStack {
-                Button("Host", systemImage: "bolt.fill") { hostingRole = role }
-                    .help("Fungis가 관리하는 새 에이전트 세션을 준비한다")
                 Button(role.assigned ? "Replace" : "Assign") { assigningRole = role }
-                    .disabled(
-                        model.snapshot.agents.isEmpty && model.hostedAgents.sessions.isEmpty
-                    )
                 if role.assigned {
                     Button("Unassign") { Task { await model.unassignRole(id: role.id) } }
                 }
@@ -332,34 +325,46 @@ private struct RoleEditor: View {
 private struct AssignmentEditor: View {
     let role: WorkspaceRole
     let agents: [AgentTerminal]
-    let hostedSessions: [HostedAgentSession]
+    @ObservedObject var coordinator: HostedAgentCoordinator
     let roles: [WorkspaceRole]
     let assign: (String, Bool) async -> Void
     let assignHosted: (HostedAgentSession, Bool) async -> Void
+    let createHosted: (HostedAgentProviderID, Bool) async -> Void
+    let stopHosted: (HostedAgentSession) async -> Void
     @State private var surfaceID: String
     @State private var hostedPrincipalID: String
+    @State private var newProvider: HostedAgentProviderID?
     @State private var sendOnboarding: Bool
     @State private var confirmReassignment = false
+    @State private var stoppingSession: HostedAgentSession?
+    @State private var creationTask: Task<Void, Never>?
 
     init(
         role: WorkspaceRole, agents: [AgentTerminal],
-        hostedSessions: [HostedAgentSession], roles: [WorkspaceRole],
+        coordinator: HostedAgentCoordinator, roles: [WorkspaceRole],
         assign: @escaping (String, Bool) async -> Void,
-        assignHosted: @escaping (HostedAgentSession, Bool) async -> Void
+        assignHosted: @escaping (HostedAgentSession, Bool) async -> Void,
+        createHosted: @escaping (HostedAgentProviderID, Bool) async -> Void,
+        stopHosted: @escaping (HostedAgentSession) async -> Void
     ) {
         self.role = role
         self.agents = agents
-        self.hostedSessions = hostedSessions
+        self.coordinator = coordinator
         self.roles = roles
         self.assign = assign
         self.assignHosted = assignHosted
+        self.createHosted = createHosted
+        self.stopHosted = stopHosted
         let current = agents.first { $0.principalID == role.agentID }
-        let currentHosted = hostedSessions.first { $0.principalID == role.agentID }
+        let currentHosted = coordinator.sessions.first {
+            $0.projectID == role.workspaceID && $0.principalID == role.agentID
+        }
         let usable = agents.first { $0.connected || $0.bindingVerified }
         _surfaceID = State(
             initialValue: currentHosted == nil ? current?.surfaceID ?? usable?.surfaceID ?? "" : ""
         )
         _hostedPrincipalID = State(initialValue: currentHosted?.principalID ?? "")
+        _newProvider = State(initialValue: nil)
         // 역할 설명이 비어 있다고 꺼두면 배정 init이 통째로 안 나간다. 그러면
         // 에이전트는 자기가 배정된 줄도 모르고 PM은 보냈다고 믿는다. 설명 유무는
         // 덧붙일 문구가 있느냐일 뿐, 부를지 말지가 아니다.
@@ -397,10 +402,29 @@ private struct AssignmentEditor: View {
             } message: {
                 Text("The previous role becomes unassigned. Its history and messages remain intact.")
             }
+            .confirmationDialog(
+                "Stop ‘\(stoppingSession?.localName ?? "")’?",
+                isPresented: Binding(
+                    get: { stoppingSession != nil },
+                    set: { if !$0 { stoppingSession = nil } }
+                ), titleVisibility: .visible
+            ) {
+                Button("Stop session", role: .destructive) {
+                    guard let session = stoppingSession else { return }
+                    stoppingSession = nil
+                    if hostedPrincipalID == session.principalID { hostedPrincipalID = "" }
+                    Task { await stopHosted(session) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The provider process stops. Any role assignment remains as SESSION OFFLINE.")
+            }
+            .onDisappear { creationTask?.cancel() }
     }
 
     private var sessionList: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
             Text("Terminal sessions").font(.caption.bold()).foregroundStyle(.secondary)
                 .padding(.horizontal, 10).padding(.top, 10)
             ForEach(Array(agents.enumerated()), id: \.element.id) { index, agent in
@@ -411,12 +435,41 @@ private struct AssignmentEditor: View {
             Text("Hosted sessions").font(.caption.bold()).foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
             if hostedSessions.isEmpty {
-                Text("Host에서 Codex 세션을 먼저 준비하세요.")
+                Text("생성된 hosted session이 없습니다.")
                     .font(.caption).foregroundStyle(.secondary).padding(10)
             } else {
                 ForEach(hostedSessions) { session in hostedSessionRow(session) }
             }
-        }.background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
+            Divider().padding(.vertical, 6)
+            Text("Create hosted session")
+                .font(.caption.bold()).foregroundStyle(.secondary).padding(.horizontal, 10)
+            ForEach(HostedAgentProviderID.allCases) { provider in
+                newHostedSessionRow(provider)
+            }
+            switch coordinator.creationState {
+            case .starting:
+                Label("app-server 시작 중…", systemImage: "hourglass")
+                    .font(.caption).foregroundStyle(.secondary).padding(10)
+            case .waitingForLogin:
+                HStack {
+                    Label(
+                        "브라우저에서 ChatGPT 로그인을 마치세요.",
+                        systemImage: "person.crop.circle"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button("Cancel") { creationTask?.cancel() }
+                }.padding(10)
+            case let .failed(message):
+                Text(message).font(.caption).foregroundStyle(.red).padding(10)
+                    .textSelection(.enabled)
+            case .stopped, .ready:
+                EmptyView()
+            }
+            }
+        }
+        .frame(maxHeight: 460)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func sessionRow(_ agent: AgentTerminal) -> some View {
@@ -426,6 +479,7 @@ private struct AssignmentEditor: View {
         return Button {
             surfaceID = agent.surfaceID
             hostedPrincipalID = ""
+            newProvider = nil
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: surfaceID == agent.surfaceID ? "checkmark.circle.fill" : "circle")
@@ -451,24 +505,57 @@ private struct AssignmentEditor: View {
     }
 
     private func hostedSessionRow(_ session: HostedAgentSession) -> some View {
+        HStack(spacing: 0) {
+            Button {
+                hostedPrincipalID = session.principalID
+                surfaceID = ""
+                newProvider = nil
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: hostedPrincipalID == session.principalID
+                          ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(hostedPrincipalID == session.principalID
+                                         ? Color.accentColor : Color.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(session.localName).foregroundStyle(.primary)
+                        Text(hostedStatusLabel(session)).font(.caption)
+                            .foregroundStyle(hostedAssignedRole(session) == nil ? .green : .orange)
+                    }
+                    Spacer()
+                    Text(session.provider.displayName.uppercased())
+                        .font(.caption2.bold()).foregroundStyle(.secondary)
+                }.padding(10).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            Button("Stop", role: .destructive) { stoppingSession = session }
+                .buttonStyle(.borderless).padding(.trailing, 10)
+        }
+    }
+
+    private func newHostedSessionRow(_ provider: HostedAgentProviderID) -> some View {
         Button {
-            hostedPrincipalID = session.principalID
+            guard provider.isAvailable else { return }
+            newProvider = provider
+            hostedPrincipalID = ""
             surfaceID = ""
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: hostedPrincipalID == session.principalID
+                Image(systemName: newProvider == provider
                       ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(hostedPrincipalID == session.principalID
+                    .foregroundStyle(newProvider == provider
                                      ? Color.accentColor : Color.secondary)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(session.localName).foregroundStyle(.primary)
-                    Text("Ready · app-server").font(.caption).foregroundStyle(.green)
+                    Text("New \(provider.displayName) session").foregroundStyle(.primary)
+                    Text(provider.isAvailable ? "Create when confirmed" : "Coming later")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(session.provider.displayName.uppercased())
+                Text(provider.isAvailable ? "NEW" : "COMING LATER")
                     .font(.caption2.bold()).foregroundStyle(.secondary)
             }.padding(10).contentShape(Rectangle())
-        }.buttonStyle(.plain)
+        }
+        .buttonStyle(.plain)
+        .disabled(!provider.isAvailable || creationInProgress)
+        .opacity(provider.isAvailable ? 1 : 0.45)
     }
 
     private func displayName(_ agent: AgentTerminal) -> String {
@@ -501,11 +588,15 @@ private struct AssignmentEditor: View {
                 performAssignment()
             }
         }.buttonStyle(.borderedProminent)
-            .disabled(surfaceID.isEmpty && hostedPrincipalID.isEmpty)
+            .disabled(
+                (surfaceID.isEmpty && hostedPrincipalID.isEmpty && newProvider == nil)
+                    || creationInProgress
+            )
     }
 
     private var assignmentButtonLabel: String {
-        if selectedHostedSession != nil { return "Assign hosted session" }
+        if newProvider != nil { return "Create & Assign" }
+        if selectedHostedSession != nil { return "Assign" }
         if selectedExistingRole?.id == role.id { return "Keep assignment" }
         if let selected = selectedAgent, !selected.connected { return "Connect and assign" }
         return selectedExistingRole == nil ? "Assign" : "Reassign"
@@ -529,15 +620,40 @@ private struct AssignmentEditor: View {
         return selectedAgent.flatMap { assignedRole(for: $0) }
     }
     private var selectedName: String {
-        selectedHostedSession?.localName ?? selectedAgent.map(displayName) ?? "session"
+        if let newProvider { return "new \(newProvider.displayName) session" }
+        return selectedHostedSession?.localName ?? selectedAgent.map(displayName) ?? "session"
     }
 
     private func performAssignment() {
-        if let session = selectedHostedSession {
+        if let newProvider {
+            creationTask = Task { await createHosted(newProvider, sendOnboarding) }
+        } else if let session = selectedHostedSession {
             Task { await assignHosted(session, sendOnboarding) }
         } else {
             Task { await assign(surfaceID, sendOnboarding) }
         }
+    }
+
+    private func hostedAssignedRole(_ session: HostedAgentSession) -> WorkspaceRole? {
+        roles.first { $0.agentID == session.principalID }
+    }
+
+    private func hostedStatusLabel(_ session: HostedAgentSession) -> String {
+        guard let assigned = hostedAssignedRole(session) else { return "Ready · not assigned" }
+        return assigned.id == role.id
+            ? "Currently assigned to this role"
+            : "Assigned to \(assigned.name)"
+    }
+
+    private var creationInProgress: Bool {
+        switch coordinator.creationState {
+        case .starting, .waitingForLogin: true
+        case .stopped, .ready, .failed: false
+        }
+    }
+
+    private var hostedSessions: [HostedAgentSession] {
+        coordinator.sessions.filter { $0.projectID == role.workspaceID }
     }
 }
 

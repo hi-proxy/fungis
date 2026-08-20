@@ -433,149 +433,137 @@ actor CodexAppServerClient: HostedAgentProviderClient {
     }
 }
 
+protocol HostedAgentAPIClient: Sendable {
+    func assignRole(id: String, agentID: String, sendOnboarding: Bool) async throws
+    func connectHostedSession(_ session: HostedAgentSession) async throws
+    func disconnectHostedSession(_ principalID: String) async throws
+    func hostedInbox(principalID: String, after: Int) async throws -> [HostedInboxMessage]
+    func replyFromHosted(
+        principalID: String, projectID: String, recipientID: String,
+        body: String, inReplyToProjectSeq: Int
+    ) async throws
+    func ackHosted(principalID: String, through: Int) async throws
+}
+
+extension FungisAPI: HostedAgentAPIClient {}
+
 @MainActor
 final class HostedAgentCoordinator: ObservableObject {
-    @Published private(set) var codexState: HostedAgentConnectionState = .stopped
+    @Published private(set) var creationState: HostedAgentConnectionState = .stopped
     @Published private(set) var sessions: [HostedAgentSession] = []
-    private let codex: any HostedAgentProviderClient
-    private var loginPollingTask: Task<Void, Never>?
+    private let makeCodexClient: @Sendable () -> any HostedAgentProviderClient
+    private var clients: [String: any HostedAgentProviderClient] = [:]
     private var inboxTasks: [String: Task<Void, Never>] = [:]
-    private let api = FungisAPI()
-    private var pendingIdentity: HostedAgentIdentity?
+    private let api: any HostedAgentAPIClient
 
-    init(codex: any HostedAgentProviderClient = CodexAppServerClient()) {
-        self.codex = codex
+    init(
+        makeCodexClient: @escaping @Sendable () -> any HostedAgentProviderClient = {
+            CodexAppServerClient()
+        },
+        api: any HostedAgentAPIClient = FungisAPI()
+    ) {
+        self.makeCodexClient = makeCodexClient
+        self.api = api
     }
 
-    func startCodex(cwd: String, projectID: String) async {
-        codexState = .starting
-        do {
-            if let existing = sessions.first, existing.projectID != projectID {
-                throw HostedAgentError.rpc(
-                    "다른 프로젝트의 hosted Codex가 실행 중입니다. 먼저 Stop 하세요."
-                )
-            }
-            if let pendingIdentity, pendingIdentity.projectID != projectID {
-                throw HostedAgentError.rpc(
-                    "다른 프로젝트의 hosted Codex가 준비 중입니다. 먼저 Stop 하세요."
-                )
-            }
-            let identity = pendingIdentity ?? sessions.first.map {
-                HostedAgentIdentity(principalID: $0.principalID, projectID: $0.projectID)
-            } ?? HostedAgentIdentity(
-                principalID: "agent-hosted-codex-\(UUID().uuidString.lowercased())",
-                projectID: projectID
-            )
-            pendingIdentity = identity
-            try await codex.configure(identity: identity)
-            let account = try await codex.start()
-            codexState = .ready(account)
-            if account.authentication.isChatGPT {
-                try await prepareCodexSession(cwd: cwd, identity: identity)
-            }
-        } catch {
-            codexState = .failed(error.localizedDescription)
+    func createAndAssign(
+        provider: HostedAgentProviderID, cwd: String, projectID: String,
+        roleID: String, sendOnboarding: Bool
+    ) async throws -> HostedAgentSession {
+        guard provider == .codex else {
+            throw HostedAgentError.rpc("Claude Code hosted session은 아직 지원하지 않습니다.")
         }
-    }
 
-    func refreshCodexAccount(cwd: String? = nil, projectID: String? = nil) async {
+        creationState = .starting
+        let identity = HostedAgentIdentity(
+            principalID: "agent-hosted-codex-\(UUID().uuidString.lowercased())",
+            projectID: projectID
+        )
+        let client = makeCodexClient()
         do {
-            let account = try await codex.account()
-            codexState = .ready(account)
-            if account.authentication.isChatGPT, let cwd, let projectID {
-                let identity = pendingIdentity ?? sessions.first.map {
-                    HostedAgentIdentity(principalID: $0.principalID, projectID: $0.projectID)
-                } ?? HostedAgentIdentity(
-                    principalID: "agent-hosted-codex-\(UUID().uuidString.lowercased())",
-                    projectID: projectID
-                )
-                pendingIdentity = identity
-                try await codex.configure(identity: identity)
-                try await prepareCodexSession(cwd: cwd, identity: identity)
-            }
-        } catch {
-            codexState = .failed(error.localizedDescription)
-        }
-    }
-
-    func beginCodexLogin(cwd: String, projectID: String) async {
-        do {
-            let url = try await codex.beginChatGPTLogin()
-            codexState = .waitingForLogin
-            NSWorkspace.shared.open(url)
-            loginPollingTask?.cancel()
-            loginPollingTask = Task { [weak self] in
+            try await client.configure(identity: identity)
+            var account = try await client.start()
+            if !account.authentication.isChatGPT {
+                creationState = .waitingForLogin
+                let url = try await client.beginChatGPTLogin()
+                NSWorkspace.shared.open(url)
+                var authenticated: HostedAgentAccount?
                 for _ in 0..<60 {
-                    guard !Task.isCancelled else { return }
-                    try? await Task.sleep(for: .seconds(2))
-                    guard let self else { return }
-                    do {
-                        let account = try await self.codex.account()
-                        if account.authentication.isChatGPT {
-                            self.codexState = .ready(account)
-                            guard let identity = self.pendingIdentity ?? self.sessions.first.map({
-                                HostedAgentIdentity(
-                                    principalID: $0.principalID, projectID: $0.projectID
-                                )
-                            }) else {
-                                throw HostedAgentError.rpc("hosted identity가 없습니다.")
-                            }
-                            try await self.prepareCodexSession(cwd: cwd, identity: identity)
-                            return
-                        }
-                    } catch {
-                        self.codexState = .failed(error.localizedDescription)
-                        return
+                    try await Task.sleep(for: .seconds(2))
+                    account = try await client.account()
+                    if account.authentication.isChatGPT {
+                        authenticated = account
+                        break
                     }
                 }
-                self?.codexState = .failed("ChatGPT 로그인을 확인하지 못했습니다.")
+                guard let authenticated else {
+                    throw HostedAgentError.rpc("ChatGPT 로그인을 확인하지 못했습니다.")
+                }
+                account = authenticated
             }
+            creationState = .ready(account)
+
+            let threadID = try await client.startThread(cwd: cwd)
+            let suffix = String(threadID.prefix(8))
+            let session = HostedAgentSession(
+                principalID: identity.principalID,
+                localName: "codex-hosted-\(suffix)", provider: .codex,
+                providerSessionID: threadID, cwd: cwd, projectID: projectID
+            )
+            try await api.connectHostedSession(session)
+            clients[session.id] = client
+            sessions.append(session)
+
+            try await assign(
+                session: session, roleID: roleID, projectID: projectID,
+                sendOnboarding: sendOnboarding
+            )
+            creationState = .stopped
+            return session
+        } catch is CancellationError {
+            if clients[identity.principalID] == nil {
+                await client.stop()
+            }
+            creationState = .stopped
+            throw CancellationError()
         } catch {
-            codexState = .failed(error.localizedDescription)
+            if clients[identity.principalID] == nil {
+                await client.stop()
+            }
+            creationState = .failed(error.localizedDescription)
+            throw error
         }
     }
 
-    func stopCodex() async {
-        loginPollingTask?.cancel()
-        loginPollingTask = nil
-        await codex.stop()
-        for task in inboxTasks.values { task.cancel() }
-        inboxTasks.removeAll()
-        for session in sessions { try? await api.disconnectHostedSession(session.principalID) }
-        sessions.removeAll()
-        pendingIdentity = nil
-        codexState = .stopped
+    func stop(_ session: HostedAgentSession) async {
+        inboxTasks.removeValue(forKey: session.id)?.cancel()
+        try? await api.disconnectHostedSession(session.principalID)
+        if let client = clients.removeValue(forKey: session.id) {
+            await client.stop()
+        }
+        sessions.removeAll { $0.id == session.id }
     }
 
     func assign(
         session: HostedAgentSession, roleID: String, projectID: String,
         sendOnboarding: Bool
     ) async throws {
+        guard session.projectID == projectID else {
+            throw HostedAgentError.rpc("다른 프로젝트의 hosted session은 배정할 수 없습니다.")
+        }
+        guard let client = clients[session.id] else {
+            throw HostedAgentError.rpc("hosted session process가 실행 중이 아닙니다.")
+        }
         try await api.assignRole(
             id: roleID, agentID: session.principalID, sendOnboarding: sendOnboarding
         )
-        startInbox(session: session, projectID: projectID)
+        startInbox(session: session, projectID: projectID, client: client)
     }
 
-    private func prepareCodexSession(
-        cwd: String, identity: HostedAgentIdentity
-    ) async throws {
-        if sessions.contains(where: { $0.provider == .codex && $0.cwd == cwd }) { return }
-        if !sessions.isEmpty {
-            throw HostedAgentError.rpc("Codex app-server 하나에는 hosted session 하나만 둡니다.")
-        }
-        let threadID = try await codex.startThread(cwd: cwd)
-        let suffix = String(threadID.prefix(8))
-        let session = HostedAgentSession(
-            principalID: identity.principalID,
-            localName: "codex-hosted-\(suffix)", provider: .codex,
-            providerSessionID: threadID, cwd: cwd, projectID: identity.projectID
-        )
-        try await api.connectHostedSession(session)
-        sessions.append(session)
-    }
-
-    private func startInbox(session: HostedAgentSession, projectID: String) {
+    private func startInbox(
+        session: HostedAgentSession, projectID: String,
+        client: any HostedAgentProviderClient
+    ) {
         inboxTasks[session.id]?.cancel()
         inboxTasks[session.id] = Task { [weak self] in
             var after = 0
@@ -591,7 +579,7 @@ final class HostedAgentCoordinator: ObservableObject {
                         if let pending = pendingAnswers[message.seq] {
                             answer = pending
                         } else {
-                            answer = try await self.codex.runTurn(
+                            answer = try await client.runTurn(
                                 threadID: session.providerSessionID, text: message.body
                             )
                             pendingAnswers[message.seq] = answer
@@ -610,7 +598,8 @@ final class HostedAgentCoordinator: ObservableObject {
                         after = max(after, message.seq)
                     }
                 } catch {
-                    self.codexState = .failed(error.localizedDescription)
+                    // The binding remains attached so the role can show SESSION OFFLINE if
+                    // the provider process dies. A later explicit Stop owns cleanup.
                 }
                 try? await Task.sleep(for: .seconds(1))
             }

@@ -222,6 +222,38 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func createHostedAndAssign(
+        provider: HostedAgentProviderID, roleID: String, cwd: String,
+        sendOnboarding: Bool
+    ) async -> Bool {
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            _ = try await hostedAgents.createAndAssign(
+                provider: provider, cwd: cwd, projectID: selectedProjectID,
+                roleID: roleID, sendOnboarding: sendOnboarding
+            )
+            apply(try await api.state(projectID: selectedProjectID))
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func stopHosted(_ session: HostedAgentSession) async {
+        isMutating = true
+        defer { isMutating = false }
+        await hostedAgents.stop(session)
+        do {
+            apply(try await api.state(projectID: selectedProjectID))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func connectedLocalName(_ surfaceID: String) -> String? {
         guard let agent = snapshot.agents.first(where: { $0.surfaceID == surfaceID }),
               agent.connected, let localName = agent.localName else { return nil }
