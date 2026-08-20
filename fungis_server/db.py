@@ -1902,6 +1902,32 @@ class FungisDB:
         inherit_context: bool = True,
         later: bool = False,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if message_id is not None:
+            with self._lock:
+                existing = self._connection.execute(
+                    "SELECT * FROM messages WHERE id = ?", (message_id,)
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["workspace_id"] != workspace_id
+                        or existing["sender_id"] != sender_id
+                        or existing["body"] != body
+                    ):
+                        raise ValueError("message id already used with different content")
+                    message = dict(existing)
+                    message["recipient_ids"] = [
+                        item["recipient_id"]
+                        for item in self._message_recipients(message["seq"])
+                    ]
+                    message["reference_ids"] = [
+                        item["principal_id"]
+                        for item in self._message_references(message["seq"])
+                    ]
+                    message["role_ids"] = [
+                        item["role_id"] for item in self._message_roles(message["seq"])
+                    ]
+                    message["tags"] = self._message_tags(message["seq"])
+                    return message, []
         message_id = message_id or str(uuid.uuid4())
         # HQ에는 역할이 없어서 받을 사람을 고를 목록 자체가 없다. 거기서 받는
         # 사람은 소집된 방의 lead 전원이다. 고르게 하면 매번 전원을 고르게 되고

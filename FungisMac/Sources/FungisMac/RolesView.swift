@@ -103,6 +103,7 @@ struct RolesView: View {
         .sheet(item: $assigningRole) { role in
             AssignmentEditor(
                 role: role, agents: model.snapshot.agents,
+                hostedSessions: model.hostedAgents.sessions,
                 roles: model.snapshot.roles
             ) { surfaceID, onboarding in
                 if await model.connectAndAssign(
@@ -110,13 +111,23 @@ struct RolesView: View {
                 ) {
                     assigningRole = nil
                 }
+            } assignHosted: { session, onboarding in
+                if await model.assignHosted(
+                    roleID: role.id, session: session, sendOnboarding: onboarding
+                ) { assigningRole = nil }
             }
         }
         .sheet(item: $historyRole) { role in
             AssignmentHistoryView(role: role)
         }
         .sheet(item: $hostingRole) { role in
-            HostedAgentSheet(role: role, coordinator: model.hostedAgents)
+            HostedAgentSheet(
+                role: role,
+                cwd: model.snapshot.projectRepositories.first {
+                    $0.projectID == model.selectedProjectID
+                }?.path ?? FileManager.default.currentDirectoryPath,
+                coordinator: model.hostedAgents
+            )
         }
         .sheet(isPresented: $editingPM) { PMProfileEditor() }
         .confirmationDialog(
@@ -182,7 +193,9 @@ struct RolesView: View {
                 Button("Host", systemImage: "bolt.fill") { hostingRole = role }
                     .help("Fungis가 관리하는 새 에이전트 세션을 준비한다")
                 Button(role.assigned ? "Replace" : "Assign") { assigningRole = role }
-                    .disabled(model.snapshot.agents.isEmpty)
+                    .disabled(
+                        model.snapshot.agents.isEmpty && model.hostedAgents.sessions.isEmpty
+                    )
                 if role.assigned {
                     Button("Unassign") { Task { await model.unassignRole(id: role.id) } }
                 }
@@ -318,23 +331,34 @@ private struct RoleEditor: View {
 private struct AssignmentEditor: View {
     let role: WorkspaceRole
     let agents: [AgentTerminal]
+    let hostedSessions: [HostedAgentSession]
     let roles: [WorkspaceRole]
     let assign: (String, Bool) async -> Void
+    let assignHosted: (HostedAgentSession, Bool) async -> Void
     @State private var surfaceID: String
+    @State private var hostedPrincipalID: String
     @State private var sendOnboarding: Bool
     @State private var confirmReassignment = false
 
     init(
-        role: WorkspaceRole, agents: [AgentTerminal], roles: [WorkspaceRole],
-        assign: @escaping (String, Bool) async -> Void
+        role: WorkspaceRole, agents: [AgentTerminal],
+        hostedSessions: [HostedAgentSession], roles: [WorkspaceRole],
+        assign: @escaping (String, Bool) async -> Void,
+        assignHosted: @escaping (HostedAgentSession, Bool) async -> Void
     ) {
         self.role = role
         self.agents = agents
+        self.hostedSessions = hostedSessions
         self.roles = roles
         self.assign = assign
+        self.assignHosted = assignHosted
         let current = agents.first { $0.principalID == role.agentID }
+        let currentHosted = hostedSessions.first { $0.principalID == role.agentID }
         let usable = agents.first { $0.connected || $0.bindingVerified }
-        _surfaceID = State(initialValue: current?.surfaceID ?? usable?.surfaceID ?? "")
+        _surfaceID = State(
+            initialValue: currentHosted == nil ? current?.surfaceID ?? usable?.surfaceID ?? "" : ""
+        )
+        _hostedPrincipalID = State(initialValue: currentHosted?.principalID ?? "")
         // 역할 설명이 비어 있다고 꺼두면 배정 init이 통째로 안 나간다. 그러면
         // 에이전트는 자기가 배정된 줄도 모르고 PM은 보냈다고 믿는다. 설명 유무는
         // 덧붙일 문구가 있느냐일 뿐, 부를지 말지가 아니다.
@@ -366,7 +390,7 @@ private struct AssignmentEditor: View {
                 isPresented: $confirmReassignment, titleVisibility: .visible
             ) {
                 Button("Move session", role: .destructive) {
-                    Task { await assign(surfaceID, sendOnboarding) }
+                    performAssignment()
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
@@ -375,10 +399,21 @@ private struct AssignmentEditor: View {
     }
 
     private var sessionList: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Terminal sessions").font(.caption.bold()).foregroundStyle(.secondary)
+                .padding(.horizontal, 10).padding(.top, 10)
             ForEach(Array(agents.enumerated()), id: \.element.id) { index, agent in
                 sessionRow(agent)
                 if index < agents.count - 1 { Divider() }
+            }
+            Divider().padding(.vertical, 6)
+            Text("Hosted sessions").font(.caption.bold()).foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+            if hostedSessions.isEmpty {
+                Text("Host에서 Codex 세션을 먼저 준비하세요.")
+                    .font(.caption).foregroundStyle(.secondary).padding(10)
+            } else {
+                ForEach(hostedSessions) { session in hostedSessionRow(session) }
             }
         }.background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
     }
@@ -387,7 +422,10 @@ private struct AssignmentEditor: View {
         let currentRole = assignedRole(for: agent)
         // binding이 유일하게 검증되지 않은 세션에는 붙지 않는다.
         let selectable = agent.connected || agent.bindingVerified
-        return Button { surfaceID = agent.surfaceID } label: {
+        return Button {
+            surfaceID = agent.surfaceID
+            hostedPrincipalID = ""
+        } label: {
             HStack(spacing: 10) {
                 Image(systemName: surfaceID == agent.surfaceID ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(
@@ -409,6 +447,27 @@ private struct AssignmentEditor: View {
         .buttonStyle(.plain)
         .disabled(!selectable)
         .opacity(selectable ? 1 : 0.45)
+    }
+
+    private func hostedSessionRow(_ session: HostedAgentSession) -> some View {
+        Button {
+            hostedPrincipalID = session.principalID
+            surfaceID = ""
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: hostedPrincipalID == session.principalID
+                      ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(hostedPrincipalID == session.principalID
+                                     ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(session.localName).foregroundStyle(.primary)
+                    Text("Ready · app-server").font(.caption).foregroundStyle(.green)
+                }
+                Spacer()
+                Text(session.provider.displayName.uppercased())
+                    .font(.caption2.bold()).foregroundStyle(.secondary)
+            }.padding(10).contentShape(Rectangle())
+        }.buttonStyle(.plain)
     }
 
     private func displayName(_ agent: AgentTerminal) -> String {
@@ -438,12 +497,14 @@ private struct AssignmentEditor: View {
             if let occupied = selectedExistingRole, occupied.id != role.id {
                 confirmReassignment = true
             } else {
-                Task { await assign(surfaceID, sendOnboarding) }
+                performAssignment()
             }
-        }.buttonStyle(.borderedProminent).disabled(surfaceID.isEmpty)
+        }.buttonStyle(.borderedProminent)
+            .disabled(surfaceID.isEmpty && hostedPrincipalID.isEmpty)
     }
 
     private var assignmentButtonLabel: String {
+        if selectedHostedSession != nil { return "Assign hosted session" }
         if selectedExistingRole?.id == role.id { return "Keep assignment" }
         if let selected = selectedAgent, !selected.connected { return "Connect and assign" }
         return selectedExistingRole == nil ? "Assign" : "Reassign"
@@ -457,11 +518,25 @@ private struct AssignmentEditor: View {
     private var selectedAgent: AgentTerminal? {
         agents.first { $0.surfaceID == surfaceID }
     }
+    private var selectedHostedSession: HostedAgentSession? {
+        hostedSessions.first { $0.principalID == hostedPrincipalID }
+    }
     private var selectedExistingRole: WorkspaceRole? {
-        selectedAgent.flatMap { assignedRole(for: $0) }
+        if let session = selectedHostedSession {
+            return roles.first { $0.agentID == session.principalID }
+        }
+        return selectedAgent.flatMap { assignedRole(for: $0) }
     }
     private var selectedName: String {
-        selectedAgent.map(displayName) ?? "session"
+        selectedHostedSession?.localName ?? selectedAgent.map(displayName) ?? "session"
+    }
+
+    private func performAssignment() {
+        if let session = selectedHostedSession {
+            Task { await assignHosted(session, sendOnboarding) }
+        } else {
+            Task { await assign(surfaceID, sendOnboarding) }
+        }
     }
 }
 

@@ -63,3 +63,26 @@ import Testing
     }
     await client.stop()
 }
+
+@Test func installedCodexAppServerCompletesAHostedTurn() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_HOST_TURN_TEST"] == "1" else {
+        return
+    }
+    let client = CodexAppServerClient()
+    do {
+        let account = try await client.start()
+        #expect(account.authentication.isChatGPT)
+        let threadID = try await client.startThread(
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+        let answer = try await client.runTurn(
+            threadID: threadID,
+            text: "Reply with exactly HOSTED_OK and do not use tools."
+        )
+        #expect(answer == "HOSTED_OK")
+    } catch {
+        await client.stop()
+        throw error
+    }
+    await client.stop()
+}

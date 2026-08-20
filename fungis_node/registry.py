@@ -275,6 +275,40 @@ class LocalRegistry:
         self.connection.commit()
         return {"local_name": local_name, **candidate.public_dict()}
 
+    def attach_hosted(
+        self, local_name: str, principal_id: str, provider: str, session_id: str,
+        host_pid: int,
+    ) -> dict[str, Any]:
+        data = {
+            "terminal_provider": "fungis-app",
+            "terminal_session_id": session_id,
+            "hosted": True,
+            "host_pid": host_pid,
+        }
+        self.connection.execute(
+            """
+            INSERT INTO bindings(
+              local_name, principal_id, provider, agent_session_id, surface_id,
+              lifecycle, attached, data_json, lifecycle_changed_at
+            ) VALUES (?, ?, ?, ?, ?, 'idle', 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(local_name) DO UPDATE SET
+              principal_id = excluded.principal_id,
+              provider = excluded.provider,
+              agent_session_id = excluded.agent_session_id,
+              surface_id = excluded.surface_id,
+              lifecycle = 'idle',
+              attached = 1,
+              data_json = excluded.data_json,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            """,
+            (
+                local_name, principal_id, provider, session_id,
+                f"hosted:{session_id}", json.dumps(data),
+            ),
+        )
+        self.connection.commit()
+        return self.binding(local_name) or {}
+
     def refresh_candidate(
         self, local_name: str, candidate: CmuxAgentCandidate
     ) -> dict[str, Any]:

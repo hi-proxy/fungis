@@ -8,6 +8,7 @@ import signal
 import subprocess
 import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -242,6 +243,25 @@ class BoardEdgePayload(BaseModel):
 class RoleAssignmentPayload(BaseModel):
     agent_id: str = Field(min_length=1)
     send_onboarding: bool = False
+
+
+class HostedSessionPayload(BaseModel):
+    local_name: str = Field(min_length=1, max_length=80)
+    principal_id: str = Field(min_length=1, max_length=200)
+    provider: str = Field(min_length=1, max_length=80)
+    session_id: str = Field(min_length=1, max_length=200)
+    host_pid: int = Field(gt=0)
+
+
+class HostedReplyPayload(BaseModel):
+    project_id: str = Field(min_length=1)
+    recipient_id: str = Field(min_length=1)
+    body: str = Field(min_length=1, max_length=20000)
+    in_reply_to_project_seq: int = Field(gt=0)
+
+
+class HostedAckPayload(BaseModel):
+    through_seq: int = Field(gt=0)
 
 
 class SharedPayload(BaseModel):
@@ -754,6 +774,87 @@ def create_web_app(
         try:
             with client() as pm:
                 return pm.assignment_history(role_id)
+        except Exception as error:
+            raise fail(error) from error
+
+    @app.put("/api/hosted-sessions/{principal_id}")
+    def connect_hosted_session(
+        principal_id: str, payload: HostedSessionPayload
+    ) -> dict:
+        if principal_id != payload.principal_id:
+            raise HTTPException(status_code=400, detail="principal id mismatch")
+        try:
+            with client() as pm:
+                binding = pm.registry.attach_hosted(
+                    payload.local_name, payload.principal_id,
+                    payload.provider, payload.session_id, payload.host_pid,
+                )
+                pm.sync_connections()
+                discovery_cache["expires_at"] = 0.0
+                return {
+                    "local_name": binding["local_name"],
+                    "principal_id": binding["principal_id"],
+                    "provider": binding["provider"],
+                    "agent_session_id": binding["agent_session_id"],
+                    "lifecycle": binding["lifecycle"],
+                }
+        except Exception as error:
+            raise fail(error) from error
+
+    @app.delete("/api/hosted-sessions/{principal_id}", status_code=204)
+    def disconnect_hosted_session(principal_id: str) -> None:
+        try:
+            with client() as pm:
+                binding = pm.registry.binding_for_principal(principal_id)
+                if binding is not None:
+                    pm.registry.detach(binding["local_name"])
+                try:
+                    pm._request("DELETE", f"/v1/bindings/{urllib.parse.quote(principal_id)}")
+                except Exception:
+                    pass
+                discovery_cache["expires_at"] = 0.0
+        except Exception as error:
+            raise fail(error) from error
+
+    @app.get("/api/hosted-sessions/{principal_id}/inbox")
+    def hosted_inbox(principal_id: str, after: int = 0) -> list[dict]:
+        try:
+            with client() as pm:
+                result = pm._request(
+                    "GET",
+                    f"/v1/messages?recipient={urllib.parse.quote(principal_id)}"
+                    f"&caller={urllib.parse.quote(principal_id)}&after={after}",
+                )
+                assert isinstance(result, list)
+                return result
+        except Exception as error:
+            raise fail(error) from error
+
+    @app.post("/api/hosted-sessions/{principal_id}/reply", status_code=201)
+    def hosted_reply(principal_id: str, payload: HostedReplyPayload) -> dict:
+        try:
+            with client(payload.project_id) as pm:
+                return pm.send_as(
+                    principal_id, payload.recipient_id, payload.body,
+                    in_reply_to_project_seq=payload.in_reply_to_project_seq,
+                    message_id=(
+                        f"hosted-reply:{principal_id}:"
+                        f"{payload.in_reply_to_project_seq}"
+                    ),
+                )
+        except Exception as error:
+            raise fail(error) from error
+
+    @app.post("/api/hosted-sessions/{principal_id}/ack")
+    def hosted_ack(principal_id: str, payload: HostedAckPayload) -> dict:
+        try:
+            with client() as pm:
+                result = pm._request(
+                    "POST", "/v1/inbox/ack-processed",
+                    {"recipient_id": principal_id, "through_seq": payload.through_seq},
+                )
+                assert isinstance(result, dict)
+                return result
         except Exception as error:
             raise fail(error) from error
 

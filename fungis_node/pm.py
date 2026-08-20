@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -87,8 +88,27 @@ class PMClient:
             f"/v1/nodes/{self.node_id}",
             {"id": self.node_id, "display_name": self._display_name("Node")},
         )
-        targets = self.registry.list()
+        targets = []
+        for binding in self.registry.list():
+            binding_data = json.loads(binding.get("data_json") or "{}")
+            host_pid = binding_data.get("host_pid") if binding_data.get("hosted") else None
+            if isinstance(host_pid, int):
+                try:
+                    os.kill(host_pid, 0)
+                except ProcessLookupError:
+                    self.registry.detach(binding["local_name"])
+                    try:
+                        self._request(
+                            "DELETE", f"/v1/bindings/{binding['principal_id']}"
+                        )
+                    except PMServerError:
+                        pass
+                    continue
+                except PermissionError:
+                    pass
+            targets.append(binding)
         for binding in targets:
+            binding_data = json.loads(binding.get("data_json") or "{}")
             recipient_id = binding["principal_id"]
             self._request(
                 "PUT",
@@ -109,8 +129,10 @@ class PMClient:
                     "node_id": self.node_id,
                     "agent_provider": binding["provider"],
                     "agent_session_id": binding["agent_session_id"],
-                    "terminal_provider": "cmux",
-                    "terminal_session_id": binding["surface_id"],
+                    "terminal_provider": binding_data.get("terminal_provider", "cmux"),
+                    "terminal_session_id": binding_data.get(
+                        "terminal_session_id", binding["surface_id"]
+                    ),
                     "lifecycle": binding["lifecycle"],
                 },
             )
@@ -316,11 +338,13 @@ class PMClient:
         inherit_context: bool = True,
         later: bool = False,
         role_ids: list[str] | None = None,
+        message_id: str | None = None,
     ) -> dict:
         result = self._request(
             "POST",
             "/v1/messages",
             {
+                "id": message_id,
                 "workspace_id": self.workspace_id,
                 "sender_id": self._recipient_id(sender_id),
                 "recipient_ids": [

@@ -204,6 +204,24 @@ final class AppModel: ObservableObject {
         return false
     }
 
+    func assignHosted(
+        roleID: String, session: HostedAgentSession, sendOnboarding: Bool
+    ) async -> Bool {
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            try await hostedAgents.assign(
+                session: session, roleID: roleID, projectID: selectedProjectID,
+                sendOnboarding: sendOnboarding
+            )
+            apply(try await api.state(projectID: selectedProjectID))
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     private func connectedLocalName(_ surfaceID: String) -> String? {
         guard let agent = snapshot.agents.first(where: { $0.surfaceID == surfaceID }),
               agent.connected, let localName = agent.localName else { return nil }

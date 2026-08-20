@@ -256,6 +256,63 @@ struct FungisAPI: Sendable {
         )
     }
 
+    func connectHostedSession(_ session: HostedAgentSession) async throws {
+        struct Payload: Encodable {
+            let local_name: String
+            let principal_id: String
+            let provider: String
+            let session_id: String
+            let host_pid: Int32
+        }
+        let _: EmptyResponse = try await request(
+            "api/hosted-sessions/\(encoded(session.principalID))", method: "PUT",
+            body: Payload(
+                local_name: session.localName, principal_id: session.principalID,
+                provider: session.provider.rawValue, session_id: session.providerSessionID,
+                host_pid: ProcessInfo.processInfo.processIdentifier
+            ), acceptsAnyObject: true
+        )
+    }
+
+    func disconnectHostedSession(_ principalID: String) async throws {
+        let _: EmptyResponse = try await request(
+            "api/hosted-sessions/\(encoded(principalID))", method: "DELETE"
+        )
+    }
+
+    func hostedInbox(principalID: String, after: Int) async throws -> [HostedInboxMessage] {
+        try await request(
+            "api/hosted-sessions/\(encoded(principalID))/inbox?after=\(after)"
+        )
+    }
+
+    func replyFromHosted(
+        principalID: String, projectID: String, recipientID: String,
+        body: String, inReplyToProjectSeq: Int
+    ) async throws {
+        struct Payload: Encodable {
+            let project_id: String
+            let recipient_id: String
+            let body: String
+            let in_reply_to_project_seq: Int
+        }
+        let _: EmptyResponse = try await request(
+            "api/hosted-sessions/\(encoded(principalID))/reply", method: "POST",
+            body: Payload(
+                project_id: projectID, recipient_id: recipientID, body: body,
+                in_reply_to_project_seq: inReplyToProjectSeq
+            ), acceptsAnyObject: true
+        )
+    }
+
+    func ackHosted(principalID: String, through: Int) async throws {
+        struct Payload: Encodable { let through_seq: Int }
+        let _: EmptyResponse = try await request(
+            "api/hosted-sessions/\(encoded(principalID))/ack", method: "POST",
+            body: Payload(through_seq: through), acceptsAnyObject: true
+        )
+    }
+
     func unassignRole(id: String) async throws {
         let _: EmptyResponse = try await request(
             "api/roles/\(id)/assignment", method: "DELETE"

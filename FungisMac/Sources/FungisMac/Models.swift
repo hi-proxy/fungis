@@ -214,6 +214,19 @@ struct ChatMessage: Decodable, Identifiable {
     }
 }
 
+struct HostedInboxMessage: Decodable, Sendable {
+    var seq: Int
+    var projectSeq: Int
+    var senderID: String
+    var body: String
+
+    enum CodingKeys: String, CodingKey {
+        case seq, body
+        case projectSeq = "project_seq"
+        case senderID = "sender_id"
+    }
+}
+
 struct AttentionRequest: Decodable, Identifiable {
     var seq: Int
     var senderID: String

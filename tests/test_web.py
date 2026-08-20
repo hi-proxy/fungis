@@ -265,6 +265,90 @@ def test_web_state_and_send_wrap_existing_server_contract(tmp_path, monkeypatch)
         server.__exit__(None, None, None)
 
 
+def test_hosted_session_can_be_assigned_process_inbox_and_reply(tmp_path, monkeypatch):
+    server = TestClient(create_app(tmp_path / "server.db"))
+    server.__enter__()
+
+    def request(self, method, path, payload=None):
+        response = server.request(method, path, json=payload)
+        response.raise_for_status()
+        return {} if response.status_code == 204 else response.json()
+
+    monkeypatch.setattr("fungis_node.pm.PMClient._request", request)
+    app = create_web_app(tmp_path / "node.db", cmux=FakeCmux())
+    try:
+        with TestClient(app) as client:
+            hosted = client.put(
+                "/api/hosted-sessions/agent-hosted-codex-1",
+                json={
+                    "local_name": "codex-hosted-1",
+                    "principal_id": "agent-hosted-codex-1",
+                    "provider": "codex",
+                    "session_id": "thread-1",
+                    "host_pid": os.getpid(),
+                },
+            )
+            assert hosted.status_code == 200
+            assert hosted.json()["principal_id"] == "agent-hosted-codex-1"
+
+            role = client.post(
+                "/api/roles", json={"name": "hosted", "onboarding_prompt": ""}
+            ).json()
+            assert client.put(
+                f"/api/roles/{role['id']}/assignment",
+                json={"agent_id": "agent-hosted-codex-1", "send_onboarding": False},
+            ).status_code == 200
+            role_state = client.get("/api/state").json()["roles"][0]
+            assert role_state["agent_id"] == "agent-hosted-codex-1"
+            assert role_state["session_connected"] is True
+
+            sent = client.post(
+                "/api/messages",
+                json={"role_ids": [role["id"]], "body": "hello hosted"},
+            ).json()
+            inbox = client.get(
+                "/api/hosted-sessions/agent-hosted-codex-1/inbox"
+            ).json()
+            assert [item["body"] for item in inbox] == ["hello hosted"]
+
+            reply = client.post(
+                "/api/hosted-sessions/agent-hosted-codex-1/reply",
+                json={
+                    "project_id": "local",
+                    "recipient_id": inbox[0]["sender_id"],
+                    "body": "hello PM",
+                    "in_reply_to_project_seq": sent["project_seq"],
+                },
+            )
+            assert reply.status_code == 201
+            duplicate = client.post(
+                "/api/hosted-sessions/agent-hosted-codex-1/reply",
+                json={
+                    "project_id": "local",
+                    "recipient_id": inbox[0]["sender_id"],
+                    "body": "hello PM",
+                    "in_reply_to_project_seq": sent["project_seq"],
+                },
+            )
+            assert duplicate.status_code == 201
+            assert duplicate.json()["seq"] == reply.json()["seq"]
+            assert client.post(
+                "/api/hosted-sessions/agent-hosted-codex-1/ack",
+                json={"through_seq": sent["seq"]},
+            ).status_code == 200
+            timeline = client.get("/api/state").json()["timeline"]
+            assert timeline[-1]["body"] == "hello PM"
+
+            assert client.delete(
+                "/api/hosted-sessions/agent-hosted-codex-1"
+            ).status_code == 204
+            assert client.get("/api/state").json()["roles"][0][
+                "session_connected"
+            ] is False
+    finally:
+        server.__exit__(None, None, None)
+
+
 def test_chat_state_is_ten_messages_and_history_pages_back_by_fifty(
     tmp_path, monkeypatch
 ):

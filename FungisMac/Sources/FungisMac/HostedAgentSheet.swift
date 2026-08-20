@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HostedAgentSheet: View {
     let role: WorkspaceRole
+    let cwd: String
     @ObservedObject var coordinator: HostedAgentCoordinator
     @Environment(\.dismiss) private var dismiss
 
@@ -22,7 +23,7 @@ struct HostedAgentSheet: View {
             }
 
             Label(
-                "이번 단계는 host 실행과 구독 인증 확인까지입니다. 역할 배정과 메시지 전달은 다음 단계에서 연결합니다.",
+                "준비된 세션은 Assign 패널의 Hosted sessions에서 역할에 연결합니다.",
                 systemImage: "info.circle"
             )
             .font(.caption)
@@ -74,7 +75,7 @@ struct HostedAgentSheet: View {
         switch coordinator.codexState {
         case .stopped, .failed:
             Button("Start Codex app-server", systemImage: "play.fill") {
-                Task { await coordinator.startCodex() }
+                Task { await coordinator.startCodex(cwd: cwd) }
             }
             .buttonStyle(.borderedProminent)
         case .starting:
@@ -86,12 +87,14 @@ struct HostedAgentSheet: View {
                         .foregroundStyle(.green)
                 } else {
                     Button("Sign in with ChatGPT", systemImage: "person.crop.circle.badge.checkmark") {
-                        Task { await coordinator.beginCodexLogin() }
+                        Task { await coordinator.beginCodexLogin(cwd: cwd) }
                     }
                     .buttonStyle(.borderedProminent)
                 }
                 Spacer()
-                Button("Refresh") { Task { await coordinator.refreshCodexAccount() } }
+                Button("Refresh") {
+                    Task { await coordinator.refreshCodexAccount(cwd: cwd) }
+                }
                 Button("Stop") { Task { await coordinator.stopCodex() } }
             }
             if case let .chatGPT(_, email) = account.authentication, let email {
@@ -99,6 +102,12 @@ struct HostedAgentSheet: View {
             } else if case .apiKey = account.authentication {
                 Text("API key 대신 ChatGPT 로그인을 기본 경로로 사용합니다.")
                     .font(.caption2).foregroundStyle(.orange)
+            }
+            if let session = coordinator.sessions.first(where: { $0.cwd == cwd }) {
+                Label(
+                    "Hosted session ready · \(session.localName)",
+                    systemImage: "checkmark.circle.fill"
+                ).font(.caption).foregroundStyle(.green)
             }
         case .waitingForLogin:
             HStack {

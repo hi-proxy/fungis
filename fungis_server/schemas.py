@@ -38,7 +38,7 @@ class BindingUpsert(BaseModel):
     node_id: str
     agent_provider: str
     agent_session_id: str
-    terminal_provider: Literal["cmux"] = "cmux"
+    terminal_provider: Literal["cmux", "fungis-app"] = "cmux"
     terminal_session_id: str
     lifecycle: Literal["running", "idle", "needs_input", "unknown"]
 

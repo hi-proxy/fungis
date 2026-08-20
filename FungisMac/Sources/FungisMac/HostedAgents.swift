@@ -158,7 +158,18 @@ protocol HostedAgentProviderClient: Sendable {
     func start() async throws -> HostedAgentAccount
     func account() async throws -> HostedAgentAccount
     func beginChatGPTLogin() async throws -> URL
+    func startThread(cwd: String) async throws -> String
+    func runTurn(threadID: String, text: String) async throws -> String
     func stop() async
+}
+
+struct HostedAgentSession: Identifiable, Equatable, Sendable {
+    let principalID: String
+    let localName: String
+    let provider: HostedAgentProviderID
+    let providerSessionID: String
+    let cwd: String
+    var id: String { principalID }
 }
 
 private final class TextBuffer: @unchecked Sendable {
@@ -261,6 +272,60 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         return url
     }
 
+    func startThread(cwd: String) async throws -> String {
+        if !initialized || process?.isRunning != true { _ = try await start() }
+        let result = try request(
+            method: "thread/start",
+            params: [
+                "cwd": cwd,
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+                "ephemeral": false,
+            ]
+        )
+        guard let thread = result["thread"] as? [String: Any],
+              let id = thread["id"] as? String else {
+            throw HostedAgentError.invalidResponse
+        }
+        return id
+    }
+
+    func runTurn(threadID: String, text: String) async throws -> String {
+        let result = try request(
+            method: "turn/start",
+            params: [
+                "threadId": threadID,
+                "input": [["type": "text", "text": text]],
+            ]
+        )
+        guard let turn = result["turn"] as? [String: Any],
+              let turnID = turn["id"] as? String else {
+            throw HostedAgentError.invalidResponse
+        }
+        var answer = ""
+        while true {
+            let message = try readMessage()
+            guard let method = message["method"] as? String,
+                  let params = message["params"] as? [String: Any] else { continue }
+            if method == "item/agentMessage/delta",
+               params["turnId"] as? String == turnID,
+               let delta = params["delta"] as? String {
+                answer += delta
+            }
+            if method == "turn/completed",
+               let completed = params["turn"] as? [String: Any],
+               completed["id"] as? String == turnID {
+                if completed["status"] as? String == "failed" {
+                    let error = completed["error"] as? [String: Any]
+                    throw HostedAgentError.rpc(
+                        error?["message"] as? String ?? "Codex turn이 실패했습니다."
+                    )
+                }
+                return answer.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+    }
+
     func stop() async {
         stopProcess()
     }
@@ -342,31 +407,40 @@ actor CodexAppServerClient: HostedAgentProviderClient {
 @MainActor
 final class HostedAgentCoordinator: ObservableObject {
     @Published private(set) var codexState: HostedAgentConnectionState = .stopped
+    @Published private(set) var sessions: [HostedAgentSession] = []
     private let codex: any HostedAgentProviderClient
     private var loginPollingTask: Task<Void, Never>?
+    private var inboxTasks: [String: Task<Void, Never>] = [:]
+    private let api = FungisAPI()
 
     init(codex: any HostedAgentProviderClient = CodexAppServerClient()) {
         self.codex = codex
     }
 
-    func startCodex() async {
+    func startCodex(cwd: String) async {
         codexState = .starting
         do {
-            codexState = .ready(try await codex.start())
+            let account = try await codex.start()
+            codexState = .ready(account)
+            if account.authentication.isChatGPT { try await prepareCodexSession(cwd: cwd) }
         } catch {
             codexState = .failed(error.localizedDescription)
         }
     }
 
-    func refreshCodexAccount() async {
+    func refreshCodexAccount(cwd: String? = nil) async {
         do {
-            codexState = .ready(try await codex.account())
+            let account = try await codex.account()
+            codexState = .ready(account)
+            if account.authentication.isChatGPT, let cwd {
+                try await prepareCodexSession(cwd: cwd)
+            }
         } catch {
             codexState = .failed(error.localizedDescription)
         }
     }
 
-    func beginCodexLogin() async {
+    func beginCodexLogin(cwd: String) async {
         do {
             let url = try await codex.beginChatGPTLogin()
             codexState = .waitingForLogin
@@ -381,6 +455,7 @@ final class HostedAgentCoordinator: ObservableObject {
                         let account = try await self.codex.account()
                         if account.authentication.isChatGPT {
                             self.codexState = .ready(account)
+                            try await self.prepareCodexSession(cwd: cwd)
                             return
                         }
                     } catch {
@@ -399,6 +474,75 @@ final class HostedAgentCoordinator: ObservableObject {
         loginPollingTask?.cancel()
         loginPollingTask = nil
         await codex.stop()
+        for task in inboxTasks.values { task.cancel() }
+        inboxTasks.removeAll()
+        for session in sessions { try? await api.disconnectHostedSession(session.principalID) }
+        sessions.removeAll()
         codexState = .stopped
+    }
+
+    func assign(
+        session: HostedAgentSession, roleID: String, projectID: String,
+        sendOnboarding: Bool
+    ) async throws {
+        try await api.assignRole(
+            id: roleID, agentID: session.principalID, sendOnboarding: sendOnboarding
+        )
+        startInbox(session: session, projectID: projectID)
+    }
+
+    private func prepareCodexSession(cwd: String) async throws {
+        if sessions.contains(where: { $0.provider == .codex && $0.cwd == cwd }) { return }
+        let threadID = try await codex.startThread(cwd: cwd)
+        let suffix = String(threadID.prefix(8))
+        let session = HostedAgentSession(
+            principalID: "agent-hosted-codex-\(threadID)",
+            localName: "codex-hosted-\(suffix)", provider: .codex,
+            providerSessionID: threadID, cwd: cwd
+        )
+        try await api.connectHostedSession(session)
+        sessions.append(session)
+    }
+
+    private func startInbox(session: HostedAgentSession, projectID: String) {
+        inboxTasks[session.id]?.cancel()
+        inboxTasks[session.id] = Task { [weak self] in
+            var after = 0
+            var pendingAnswers: [Int: String] = [:]
+            while !Task.isCancelled {
+                guard let self else { return }
+                do {
+                    let messages = try await self.api.hostedInbox(
+                        principalID: session.principalID, after: after
+                    )
+                    for message in messages {
+                        let answer: String
+                        if let pending = pendingAnswers[message.seq] {
+                            answer = pending
+                        } else {
+                            answer = try await self.codex.runTurn(
+                                threadID: session.providerSessionID, text: message.body
+                            )
+                            pendingAnswers[message.seq] = answer
+                        }
+                        if !answer.isEmpty {
+                            try await self.api.replyFromHosted(
+                                principalID: session.principalID, projectID: projectID,
+                                recipientID: message.senderID, body: answer,
+                                inReplyToProjectSeq: message.projectSeq
+                            )
+                        }
+                        try await self.api.ackHosted(
+                            principalID: session.principalID, through: message.seq
+                        )
+                        pendingAnswers.removeValue(forKey: message.seq)
+                        after = max(after, message.seq)
+                    }
+                } catch {
+                    self.codexState = .failed(error.localizedDescription)
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 }
