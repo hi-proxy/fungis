@@ -303,6 +303,21 @@ class CmuxAdapter:
                     surface_tty = process_tty
                     binding_verified = True
                     verification_reason = "codex_process_tty_surface"
+                elif not codex_tty_matches and surface_tty is None:
+                    # cmux의 agent-session surface는 살아 있어도 tty를 null로
+                    # 내놓을 수 있다. Codex 프로세스에는 실제 tty가 남아 있지만
+                    # 트리 안에 그 tty가 하나도 없으므로, 예전에는 연결할 길이
+                    # 없었다.
+                    #
+                    # 이때만 canonical transcript를 가진 살아 있는 PID와 그
+                    # 세션의 hook가 직접 가리킨, 현재 트리에 실재하는 surface를
+                    # 한 쌍으로 본다. tty가 다른 살아 있는 값이면 아래 거절을
+                    # 그대로 타고, 같은 tty surface가 여럿인 경우도 허용하지
+                    # 않는다. 검사를 없애는 것이 아니라 cmux가 증거 한 칸을
+                    # 비워 둔 경우의 다른 증거를 쓴다.
+                    surface_tty = process_tty
+                    binding_verified = True
+                    verification_reason = "codex_live_hook_surface_without_tty"
                 else:
                     binding_verified = False
                     verification_reason = (

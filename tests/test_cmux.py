@@ -222,6 +222,42 @@ def test_codex_canonical_transcript_requires_process_tty_surface(tmp_path):
     assert discovered[0].verification_reason == "codex_process_tty_surface"
 
 
+def test_codex_live_hook_surface_can_fill_missing_cmux_tty(tmp_path):
+    """cmux agent-session이 tty를 null로 내놓아도 현재 Codex에 붙는다.
+
+    프로세스에는 tty가 있지만 cmux 트리에는 그 tty가 없고, hook가 가리킨
+    surface 자체는 살아 있는 현재 실측 모양이다. canonical transcript와
+    살아 있는 PID가 없는 내부·죽은 세션은 기존 검사에서 먼저 걸러진다.
+    """
+    hook_store = tmp_path / "hooks"
+    hook_store.mkdir()
+    (hook_store / "codex-hook-sessions.json").write_text(json.dumps({
+        "sessions": {"main-session": {
+            "sessionId": "main-session", "surfaceId": "surface-uuid",
+            "cwd": "/project", "agentLifecycle": "running", "pid": 123,
+            "transcriptPath": "/sessions/rollout-main-session.jsonl",
+        }}
+    }))
+
+    class AgentSessionCmux(FakeCmux):
+        def _run_json(self, *args):
+            tree = super()._run_json(*args)
+            surface = tree["windows"][0]["workspaces"][0]["panes"][0]["surfaces"][0]
+            surface["tty"] = None
+            return tree
+
+        @staticmethod
+        def _process_tty(pid):
+            return "ttys013"
+
+    candidate = AgentSessionCmux(hook_store_dir=hook_store).discover_agents()[0]
+    assert candidate.surface_id == "surface-uuid"
+    assert candidate.surface_ref == "surface:7"
+    assert candidate.tty == "ttys013"
+    assert candidate.binding_verified is True
+    assert candidate.verification_reason == "codex_live_hook_surface_without_tty"
+
+
 def test_codex_stale_hook_surface_is_corrected_by_unique_process_tty(tmp_path):
     hook_store = tmp_path / "hooks"
     hook_store.mkdir()
