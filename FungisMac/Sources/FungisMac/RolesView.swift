@@ -7,6 +7,7 @@ struct RolesView: View {
     @State private var editingRole: WorkspaceRole?
     @State private var assigningRole: WorkspaceRole?
     @State private var historyRole: WorkspaceRole?
+    @State private var hostingRole: WorkspaceRole?
     @State private var deletingRole: WorkspaceRole?
     @State private var editingPM = false
     @State private var showConvene = false
@@ -114,6 +115,9 @@ struct RolesView: View {
         .sheet(item: $historyRole) { role in
             AssignmentHistoryView(role: role)
         }
+        .sheet(item: $hostingRole) { role in
+            HostedAgentSheet(role: role, coordinator: model.hostedAgents)
+        }
         .sheet(isPresented: $editingPM) { PMProfileEditor() }
         .confirmationDialog(
             "Delete role ‘\(deletingRole?.name ?? "")’? Its message and assignment history remain stored.",
@@ -175,6 +179,8 @@ struct RolesView: View {
             }
             Divider()
             HStack {
+                Button("Host", systemImage: "bolt.fill") { hostingRole = role }
+                    .help("Fungis가 관리하는 새 에이전트 세션을 준비한다")
                 Button(role.assigned ? "Replace" : "Assign") { assigningRole = role }
                     .disabled(model.snapshot.agents.isEmpty)
                 if role.assigned {

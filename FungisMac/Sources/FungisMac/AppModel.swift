@@ -10,6 +10,7 @@ struct RecipientSelection: Codable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    let hostedAgents = HostedAgentCoordinator()
     @Published var snapshot = FungisSnapshot.empty
     /// 보드는 방에 속하지 않아서 스냅샷과 따로 받는다.
     @Published var board = BoardSnapshot.empty
