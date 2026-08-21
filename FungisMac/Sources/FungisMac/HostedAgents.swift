@@ -335,7 +335,7 @@ private final class TextBuffer: @unchecked Sendable {
     }
 }
 
-private final class HostedProcessExitSignal: @unchecked Sendable {
+private final class HostedProcessExitSignal: Sendable {
     let stream: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
 
