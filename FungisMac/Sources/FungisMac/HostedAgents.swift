@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-enum HostedAgentProviderID: String, CaseIterable, Identifiable, Sendable {
+enum HostedAgentProviderID: String, CaseIterable, Codable, Identifiable, Sendable {
     case codex
     case claudeCode = "claude-code"
 
@@ -183,6 +183,7 @@ protocol HostedAgentProviderClient: Sendable {
     func account() async throws -> HostedAgentAccount
     func beginChatGPTLogin() async throws -> URL
     func startThread(cwd: String) async throws -> String
+    func resumeThread(threadID: String, cwd: String) async throws -> String
     func runTurn(threadID: String, text: String) async throws -> String
     func waitForExit() async
     func stop() async
@@ -314,6 +315,24 @@ struct HostedAgentSession: Identifiable, Equatable, Sendable {
     let cwd: String
     let projectID: String
     var id: String { principalID }
+}
+
+struct HostedAgentRecoveryRecord: Equatable, Decodable, Sendable {
+    let principalID: String
+    let localName: String
+    let provider: HostedAgentProviderID
+    let providerSessionID: String
+    let cwd: String?
+    let projectID: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case principalID = "principal_id"
+        case localName = "local_name"
+        case provider
+        case providerSessionID = "session_id"
+        case cwd
+        case projectID = "project_id"
+    }
 }
 
 private final class TextBuffer: @unchecked Sendable {
@@ -481,6 +500,25 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         )
         guard let thread = result["thread"] as? [String: Any],
               let id = thread["id"] as? String else {
+            throw HostedAgentError.invalidResponse
+        }
+        return id
+    }
+
+    func resumeThread(threadID: String, cwd: String) async throws -> String {
+        if !initialized || process?.isRunning != true { _ = try await start() }
+        let result = try request(
+            method: "thread/resume",
+            params: [
+                "threadId": threadID,
+                "cwd": cwd,
+                "approvalPolicy": "untrusted",
+                "sandbox": "workspace-write",
+            ]
+        )
+        guard let thread = result["thread"] as? [String: Any],
+              let id = thread["id"] as? String,
+              id == threadID else {
             throw HostedAgentError.invalidResponse
         }
         return id
@@ -655,8 +693,9 @@ actor CodexAppServerClient: HostedAgentProviderClient {
 
 protocol HostedAgentAPIClient: Sendable {
     func assignRole(id: String, agentID: String, sendOnboarding: Bool) async throws
+    func recoverableHostedSessions() async throws -> [HostedAgentRecoveryRecord]
     func connectHostedSession(_ session: HostedAgentSession) async throws
-    func disconnectHostedSession(_ principalID: String) async throws
+    func disconnectHostedSession(_ principalID: String, forget: Bool) async throws
     func hostedInbox(principalID: String, after: Int) async throws -> [HostedInboxMessage]
     func replyFromHosted(
         principalID: String, projectID: String, recipientID: String,
@@ -678,6 +717,7 @@ final class HostedAgentCoordinator: ObservableObject {
     @Published private(set) var sessions: [HostedAgentSession] = []
     @Published private(set) var pendingApprovals: [HostedApprovalRequest] = []
     @Published private(set) var presentedApproval: HostedApprovalRequest?
+    @Published private(set) var recoveryFailures: [String: String] = [:]
     @Published var approvalTimeoutMinutes: Int {
         didSet { UserDefaults.standard.set(approvalTimeoutMinutes, forKey: Self.timeoutKey) }
     }
@@ -689,6 +729,8 @@ final class HostedAgentCoordinator: ObservableObject {
         String: CheckedContinuation<HostedApprovalDecision, Never>
     ] = [:]
     private var approvalTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private var isRestoring = false
+    private var hasRestored = false
     private let api: any HostedAgentAPIClient
     private static let timeoutKey = "hostedApprovalTimeoutMinutes"
 
@@ -780,15 +822,86 @@ final class HostedAgentCoordinator: ObservableObject {
         }
     }
 
+    func restorePersistedSessions() async throws {
+        guard !hasRestored, !isRestoring else { return }
+        isRestoring = true
+        defer { isRestoring = false }
+
+        let records = try await api.recoverableHostedSessions()
+        for record in records {
+            guard clients[record.principalID] == nil,
+                  !sessions.contains(where: { $0.id == record.principalID }) else { continue }
+            guard record.provider == .codex else {
+                recoveryFailures[record.principalID] = "지원하지 않는 hosted provider입니다."
+                continue
+            }
+            guard let cwd = HostedWorkspaceDirectory.validatedPath(record.cwd) else {
+                recoveryFailures[record.principalID] =
+                    "저장된 workspace 폴더가 없거나 읽을 수 없습니다."
+                continue
+            }
+            guard let projectID = record.projectID, !projectID.isEmpty else {
+                recoveryFailures[record.principalID] = "저장된 프로젝트가 없습니다."
+                continue
+            }
+
+            let session = HostedAgentSession(
+                principalID: record.principalID, localName: record.localName,
+                provider: record.provider, providerSessionID: record.providerSessionID,
+                cwd: cwd, projectID: projectID
+            )
+            let client = makeCodexClient()
+            do {
+                try await client.configure(
+                    identity: HostedAgentIdentity(
+                        principalID: session.principalID, projectID: session.projectID
+                    )
+                )
+                await client.configureApprovalHandler { [weak self] approval in
+                    guard let self else { return .cancel }
+                    return await self.waitForApproval(approval)
+                }
+                let account = try await client.start()
+                guard account.authentication.isChatGPT else {
+                    throw HostedAgentError.rpc(
+                        "저장된 Codex session을 복구하려면 ChatGPT 로그인이 필요합니다."
+                    )
+                }
+                _ = try await client.resumeThread(
+                    threadID: session.providerSessionID, cwd: session.cwd
+                )
+                try await api.connectHostedSession(session)
+                clients[session.id] = client
+                sessions.append(session)
+                recoveryFailures.removeValue(forKey: session.id)
+                watchLifecycle(session: session, client: client)
+                startInbox(session: session, projectID: session.projectID, client: client)
+            } catch {
+                await client.stop()
+                recoveryFailures[session.id] = error.localizedDescription
+            }
+        }
+        hasRestored = true
+    }
+
     func stop(_ session: HostedAgentSession) async {
         lifecycleTasks.removeValue(forKey: session.id)?.cancel()
         cancelApprovals(for: session.principalID)
         inboxTasks.removeValue(forKey: session.id)?.cancel()
-        try? await api.disconnectHostedSession(session.principalID)
+        try? await api.disconnectHostedSession(session.principalID, forget: true)
         if let client = clients.removeValue(forKey: session.id) {
             await client.stop()
         }
         sessions.removeAll { $0.id == session.id }
+    }
+
+    func stopFailedRecovery(_ principalID: String) async {
+        do {
+            try await api.disconnectHostedSession(principalID, forget: true)
+            recoveryFailures.removeValue(forKey: principalID)
+        } catch {
+            recoveryFailures[principalID] = error.localizedDescription
+        }
     }
 
     private func watchLifecycle(
@@ -816,7 +929,7 @@ final class HostedAgentCoordinator: ObservableObject {
         // 않는다. 앱이 살아 있는 동안 재시도하고, 앱 종료는 task를 함께 끝낸다.
         while !Task.isCancelled {
             do {
-                try await api.disconnectHostedSession(session.principalID)
+                try await api.disconnectHostedSession(session.principalID, forget: false)
                 break
             } catch {
                 try? await Task.sleep(for: .seconds(1))

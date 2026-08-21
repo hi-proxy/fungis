@@ -301,6 +301,7 @@ struct FungisAPI: Sendable {
             let session_id: String
             let host_pid: Int32
             let project_id: String
+            let cwd: String
         }
         let _: EmptyResponse = try await request(
             "api/hosted-sessions/\(encoded(session.principalID))", method: "PUT",
@@ -308,14 +309,18 @@ struct FungisAPI: Sendable {
                 local_name: session.localName, principal_id: session.principalID,
                 provider: session.provider.rawValue, session_id: session.providerSessionID,
                 host_pid: ProcessInfo.processInfo.processIdentifier,
-                project_id: session.projectID
+                project_id: session.projectID, cwd: session.cwd
             ), acceptsAnyObject: true
         )
     }
 
-    func disconnectHostedSession(_ principalID: String) async throws {
+    func recoverableHostedSessions() async throws -> [HostedAgentRecoveryRecord] {
+        try await request("api/hosted-sessions")
+    }
+
+    func disconnectHostedSession(_ principalID: String, forget: Bool) async throws {
         let _: EmptyResponse = try await request(
-            "api/hosted-sessions/\(encoded(principalID))", method: "DELETE"
+            "api/hosted-sessions/\(encoded(principalID))?forget=\(forget)", method: "DELETE"
         )
     }
 

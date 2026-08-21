@@ -100,6 +100,37 @@ import Testing
     await client.stop()
 }
 
+@Test func installedCodexAppServerResumesAPersistedThread() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_RESUME_TEST"] == "1" else {
+        return
+    }
+    let cwd = FileManager.default.temporaryDirectory.path
+    let first = CodexAppServerClient()
+    let threadID: String
+    do {
+        _ = try await first.start()
+        threadID = try await first.startThread(cwd: cwd)
+        _ = try await first.runTurn(
+            threadID: threadID,
+            text: "Reply with exactly RESUME_READY and do not use tools."
+        )
+    } catch {
+        await first.stop()
+        throw error
+    }
+    await first.stop()
+
+    let resumed = CodexAppServerClient()
+    do {
+        _ = try await resumed.start()
+        #expect(try await resumed.resumeThread(threadID: threadID, cwd: cwd) == threadID)
+    } catch {
+        await resumed.stop()
+        throw error
+    }
+    await resumed.stop()
+}
+
 @Test func installedCodexToolsReceiveOnlyTheirHostedFungisIdentity() async throws {
     guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_IDENTITY_TEST"] == "1" else {
         return
@@ -181,6 +212,8 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
     let threadID: String
     private(set) var identity: HostedAgentIdentity?
     private(set) var stopped = false
+    private(set) var startedCwds: [String] = []
+    private(set) var resumedThreads: [(String, String)] = []
     private var approvalHandler: HostedApprovalHandler?
     private var exited = false
     private var exitWaiters: [CheckedContinuation<Void, Never>] = []
@@ -194,7 +227,14 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
     func start() async throws -> HostedAgentAccount { accountValue }
     func account() async throws -> HostedAgentAccount { accountValue }
     func beginChatGPTLogin() async throws -> URL { URL(string: "https://example.com/login")! }
-    func startThread(cwd: String) async throws -> String { threadID }
+    func startThread(cwd: String) async throws -> String {
+        startedCwds.append(cwd)
+        return threadID
+    }
+    func resumeThread(threadID: String, cwd: String) async throws -> String {
+        resumedThreads.append((threadID, cwd))
+        return threadID
+    }
     func runTurn(threadID: String, text: String) async throws -> String { "" }
     func waitForExit() async {
         if exited { return }
@@ -246,6 +286,12 @@ private final class FakeHostedProviderFactory: @unchecked Sendable {
         defer { lock.unlock() }
         return storage[index]
     }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.count
+    }
 }
 
 private actor FakeHostedAgentAPI: HostedAgentAPIClient {
@@ -254,17 +300,28 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     private(set) var assignments: [(roleID: String, agentID: String)] = []
     private(set) var createdApprovals: [HostedApprovalRequest] = []
     private(set) var resolvedApprovals: [(String, String, String?)] = []
+    private(set) var recoveryRecords: [HostedAgentRecoveryRecord] = []
+    private(set) var disconnectForgetValues: [Bool] = []
+
+    func setRecoveryRecords(_ records: [HostedAgentRecoveryRecord]) {
+        recoveryRecords = records
+    }
 
     func assignRole(id: String, agentID: String, sendOnboarding: Bool) async throws {
         assignments.append((id, agentID))
+    }
+
+    func recoverableHostedSessions() async throws -> [HostedAgentRecoveryRecord] {
+        recoveryRecords
     }
 
     func connectHostedSession(_ session: HostedAgentSession) async throws {
         connected.append(session.principalID)
     }
 
-    func disconnectHostedSession(_ principalID: String) async throws {
+    func disconnectHostedSession(_ principalID: String, forget: Bool) async throws {
         disconnected.append(principalID)
+        disconnectForgetValues.append(forget)
     }
 
     func hostedInbox(principalID: String, after: Int) async throws -> [HostedInboxMessage] { [] }
@@ -351,6 +408,54 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
 }
 
 @MainActor
+@Test func persistedHostedSessionsResumeWithoutStartingNewThreads() async throws {
+    let factory = FakeHostedProviderFactory()
+    let api = FakeHostedAgentAPI()
+    let workspace = FileManager.default.temporaryDirectory
+    let valid = HostedAgentRecoveryRecord(
+        principalID: "agent-hosted-restored", localName: "codex-hosted-restored",
+        provider: .codex, providerSessionID: "thread-existing",
+        cwd: workspace.path, projectID: "project-1"
+    )
+    let missingWorkspace = HostedAgentRecoveryRecord(
+        principalID: "agent-hosted-missing", localName: "codex-hosted-missing",
+        provider: .codex, providerSessionID: "thread-missing",
+        cwd: workspace.appending(path: UUID().uuidString).path, projectID: "project-1"
+    )
+    await api.setRecoveryRecords([missingWorkspace, valid])
+    let coordinator = HostedAgentCoordinator(
+        makeCodexClient: { factory.make() }, api: api
+    )
+
+    try await coordinator.restorePersistedSessions()
+
+    #expect(coordinator.sessions == [HostedAgentSession(
+        principalID: valid.principalID, localName: valid.localName,
+        provider: valid.provider, providerSessionID: valid.providerSessionID,
+        cwd: workspace.path, projectID: "project-1"
+    )])
+    #expect(coordinator.recoveryFailures[missingWorkspace.principalID] != nil)
+    #expect(factory.count == 1)
+    #expect(await factory.client(at: 0).startedCwds.isEmpty)
+    let resumed = await factory.client(at: 0).resumedThreads
+    #expect(resumed.count == 1)
+    #expect(resumed.first?.0 == "thread-existing")
+    #expect(resumed.first?.1 == workspace.path)
+    #expect(await factory.client(at: 0).identity == HostedAgentIdentity(
+        principalID: valid.principalID, projectID: "project-1"
+    ))
+    #expect(await api.connected == [valid.principalID])
+    #expect(await api.assignments.isEmpty)
+
+    try await coordinator.restorePersistedSessions()
+    #expect(factory.count == 1)
+    await coordinator.stop(coordinator.sessions[0])
+    await coordinator.stopFailedRecovery(missingWorkspace.principalID)
+    #expect(coordinator.recoveryFailures.isEmpty)
+    #expect(await api.disconnectForgetValues == [true, true])
+}
+
+@MainActor
 @Test func hostedApprovalWaitsForPMAndReturnsSessionDecision() async throws {
     let factory = FakeHostedProviderFactory()
     let api = FakeHostedAgentAPI()
@@ -424,6 +529,7 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     #expect(coordinator.pendingApprovals.isEmpty)
     #expect(await decisionTask.value == .cancel)
     #expect(await api.disconnected == [session.principalID])
+    #expect(await api.disconnectForgetValues == [false])
     #expect(await factory.client(at: 0).stopped)
 }
 

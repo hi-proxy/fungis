@@ -94,6 +94,7 @@ final class AppModel: ObservableObject {
             let streamingProject = selectedProjectID
             do {
                 try await DaemonManager.shared.ensureRunning()
+                try await hostedAgents.restorePersistedSessions()
                 // WebSocket 첫 push를 기다리지 않고 HTTP로 화면을 먼저 채운다.
                 await refresh()
                 let task = Task {

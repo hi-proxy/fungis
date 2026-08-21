@@ -277,13 +277,15 @@ class LocalRegistry:
 
     def attach_hosted(
         self, local_name: str, principal_id: str, provider: str, session_id: str,
-        host_pid: int,
+        host_pid: int, cwd: str, project_id: str,
     ) -> dict[str, Any]:
         data = {
             "terminal_provider": "fungis-app",
             "terminal_session_id": session_id,
             "hosted": True,
             "host_pid": host_pid,
+            "cwd": cwd,
+            "project_id": project_id,
         }
         self.connection.execute(
             """
@@ -308,6 +310,57 @@ class LocalRegistry:
         )
         self.connection.commit()
         return self.binding(local_name) or {}
+
+    def recoverable_hosted(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM bindings ORDER BY updated_at, local_name"
+        ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            try:
+                data = json.loads(value.get("data_json") or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not data.get("hosted"):
+                continue
+            project_id = (
+                data.get("project_id")
+                or self.state(f"active_project:{value['principal_id']}")
+            )
+            repository = self.project_repository(project_id) if project_id else None
+            result.append({
+                "local_name": value["local_name"],
+                "principal_id": value["principal_id"],
+                "provider": value["provider"],
+                "session_id": value["agent_session_id"],
+                "cwd": data.get("cwd") or (repository or {}).get("path"),
+                "project_id": project_id,
+                "attached": bool(value["attached"]),
+                "host_pid": data.get("host_pid"),
+            })
+        return result
+
+    def forget_hosted(self, principal_id: str) -> bool:
+        row = self.connection.execute(
+            "SELECT data_json FROM bindings WHERE principal_id = ?", (principal_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            hosted = bool(json.loads(row["data_json"] or "{}").get("hosted"))
+        except json.JSONDecodeError:
+            hosted = False
+        if not hosted:
+            return False
+        cursor = self.connection.execute(
+            "DELETE FROM bindings WHERE principal_id = ?", (principal_id,)
+        )
+        self.connection.execute(
+            "DELETE FROM node_state WHERE key = ?", (f"active_project:{principal_id}",)
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
 
     def refresh_candidate(
         self, local_name: str, candidate: CmuxAgentCandidate

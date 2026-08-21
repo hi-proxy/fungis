@@ -338,6 +338,7 @@ private struct AssignmentEditor: View {
     @State private var sendOnboarding: Bool
     @State private var confirmReassignment = false
     @State private var stoppingSession: HostedAgentSession?
+    @State private var stoppingRecoveryPrincipalID: String?
     @State private var creationTask: Task<Void, Never>?
     @State private var workspacePath: String
     @State private var choosingWorkspace = false
@@ -425,6 +426,22 @@ private struct AssignmentEditor: View {
             } message: {
                 Text("The provider process stops. Any role assignment remains as SESSION OFFLINE.")
             }
+            .confirmationDialog(
+                "Stop failed hosted session?",
+                isPresented: Binding(
+                    get: { stoppingRecoveryPrincipalID != nil },
+                    set: { if !$0 { stoppingRecoveryPrincipalID = nil } }
+                ), titleVisibility: .visible
+            ) {
+                Button("Stop session", role: .destructive) {
+                    guard let principalID = stoppingRecoveryPrincipalID else { return }
+                    stoppingRecoveryPrincipalID = nil
+                    Task { await coordinator.stopFailedRecovery(principalID) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The recovery record is removed. Any role assignment remains offline.")
+            }
             .fileImporter(
                 isPresented: $choosingWorkspace,
                 allowedContentTypes: [.folder], allowsMultipleSelection: false
@@ -454,6 +471,23 @@ private struct AssignmentEditor: View {
                     .font(.caption).foregroundStyle(.secondary).padding(10)
             } else {
                 ForEach(hostedSessions) { session in hostedSessionRow(session) }
+            }
+            ForEach(coordinator.recoveryFailures.keys.sorted(), id: \.self) { principalID in
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("복구 실패 · \(String(principalID.suffix(8)))")
+                            .font(.caption.bold()).foregroundStyle(.red)
+                        Text(coordinator.recoveryFailures[principalID] ?? "알 수 없는 오류")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                    Button("Stop", role: .destructive) {
+                        stoppingRecoveryPrincipalID = principalID
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .padding(10)
             }
             Divider().padding(.vertical, 6)
             Text("Create hosted session")

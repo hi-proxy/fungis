@@ -287,10 +287,35 @@ def test_hosted_session_can_be_assigned_process_inbox_and_reply(tmp_path, monkey
                     "session_id": "thread-1",
                     "host_pid": os.getpid(),
                     "project_id": "local",
+                    "cwd": str(tmp_path),
                 },
             )
             assert hosted.status_code == 200
             assert hosted.json()["principal_id"] == "agent-hosted-codex-1"
+            recovery = client.get("/api/hosted-sessions")
+            assert recovery.status_code == 200
+            assert recovery.json() == [{
+                "local_name": "codex-hosted-1",
+                "principal_id": "agent-hosted-codex-1",
+                "provider": "codex",
+                "session_id": "thread-1",
+                "cwd": str(tmp_path),
+                "project_id": "local",
+                "attached": True,
+                "host_pid": os.getpid(),
+            }]
+            assert client.put(
+                "/api/hosted-sessions/agent-hosted-codex-1",
+                json={
+                    "local_name": "codex-hosted-1",
+                    "principal_id": "agent-hosted-codex-1",
+                    "provider": "codex",
+                    "session_id": "thread-1",
+                    "host_pid": 1,
+                    "project_id": "local",
+                    "cwd": str(tmp_path),
+                },
+            ).status_code == 409
             registry = LocalRegistry(tmp_path / "node.db")
             assert registry.state(
                 "active_project:agent-hosted-codex-1"
@@ -346,8 +371,28 @@ def test_hosted_session_can_be_assigned_process_inbox_and_reply(tmp_path, monkey
             assert timeline[-1]["body"] == "hello PM"
 
             assert client.delete(
+                "/api/hosted-sessions/agent-hosted-codex-1?forget=false"
+            ).status_code == 204
+            suspended = client.get("/api/hosted-sessions").json()
+            assert len(suspended) == 1
+            assert suspended[0]["attached"] is False
+            assert client.put(
+                "/api/hosted-sessions/agent-hosted-codex-1",
+                json={
+                    "local_name": "codex-hosted-1",
+                    "principal_id": "agent-hosted-codex-1",
+                    "provider": "codex",
+                    "session_id": "thread-1",
+                    "host_pid": os.getpid(),
+                    "project_id": "local",
+                    "cwd": str(tmp_path),
+                },
+            ).status_code == 200
+
+            assert client.delete(
                 "/api/hosted-sessions/agent-hosted-codex-1"
             ).status_code == 204
+            assert client.get("/api/hosted-sessions").json() == []
             assert client.get("/api/state").json()["roles"][0][
                 "session_connected"
             ] is False

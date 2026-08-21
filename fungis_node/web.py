@@ -267,6 +267,7 @@ class HostedSessionPayload(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     host_pid: int = Field(gt=0)
     project_id: str = Field(min_length=1)
+    cwd: str = Field(min_length=1)
 
 
 class HostedReplyPayload(BaseModel):
@@ -338,6 +339,7 @@ def create_web_app(
         "agents": [],
     }
     discovery_lock = threading.Lock()
+    hosted_claim_lock = threading.Lock()
 
     @contextmanager
     def client(workspace_id: str = "local") -> Iterator[PMClient]:
@@ -793,6 +795,11 @@ def create_web_app(
         except Exception as error:
             raise fail(error) from error
 
+    @app.get("/api/hosted-sessions")
+    def recoverable_hosted_sessions() -> list[dict]:
+        with client() as pm:
+            return pm.registry.recoverable_hosted()
+
     @app.put("/api/hosted-sessions/{principal_id}")
     def connect_hosted_session(
         principal_id: str, payload: HostedSessionPayload
@@ -800,10 +807,28 @@ def create_web_app(
         if principal_id != payload.principal_id:
             raise HTTPException(status_code=400, detail="principal id mismatch")
         try:
-            with client() as pm:
+            with hosted_claim_lock, client() as pm:
+                existing = pm.registry.binding_for_principal(payload.principal_id)
+                if existing is not None:
+                    data = json.loads(existing.get("data_json") or "{}")
+                    owner_pid = data.get("host_pid") if data.get("hosted") else None
+                    if isinstance(owner_pid, int) and owner_pid != payload.host_pid:
+                        try:
+                            os.kill(owner_pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        except PermissionError:
+                            raise HTTPException(
+                                status_code=409, detail="hosted session has another live owner"
+                            )
+                        else:
+                            raise HTTPException(
+                                status_code=409, detail="hosted session has another live owner"
+                            )
                 binding = pm.registry.attach_hosted(
                     payload.local_name, payload.principal_id,
                     payload.provider, payload.session_id, payload.host_pid,
+                    payload.cwd, payload.project_id,
                 )
                 pm.registry.set_state(
                     f"active_project:{payload.principal_id}", payload.project_id
@@ -818,15 +843,19 @@ def create_web_app(
                     "lifecycle": binding["lifecycle"],
                 }
         except Exception as error:
+            if isinstance(error, HTTPException):
+                raise
             raise fail(error) from error
 
     @app.delete("/api/hosted-sessions/{principal_id}", status_code=204)
-    def disconnect_hosted_session(principal_id: str) -> None:
+    def disconnect_hosted_session(principal_id: str, forget: bool = True) -> None:
         try:
             with client() as pm:
                 binding = pm.registry.binding_for_principal(principal_id)
                 if binding is not None:
                     pm.registry.detach(binding["local_name"])
+                if forget:
+                    pm.registry.forget_hosted(principal_id)
                 try:
                     pm._request("DELETE", f"/v1/bindings/{urllib.parse.quote(principal_id)}")
                 except Exception:

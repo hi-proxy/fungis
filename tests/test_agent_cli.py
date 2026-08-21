@@ -128,7 +128,8 @@ def test_hosted_identity_never_falls_back_to_current_cmux_surface(
 ):
     registry = LocalRegistry(tmp_path / "node.db")
     registry.attach_hosted(
-        "codex-hosted", "agent-hosted", "codex", "thread-1", 123
+        "codex-hosted", "agent-hosted", "codex", "thread-1", 123,
+        str(tmp_path), "hosted-room",
     )
     registry.set_state("active_project:agent-terminal", "fungis")
     monkeypatch.setenv("FUNGIS_HOSTED_PRINCIPAL_ID", "agent-hosted")
@@ -143,6 +144,26 @@ def test_hosted_identity_never_falls_back_to_current_cmux_surface(
     assert active_project(registry, "agent-hosted") == "hosted-room"
     registry.set_state("active_project:agent-hosted", "hosted-room")
     assert registry.state("active_project:agent-terminal") == "fungis"
+    registry.close()
+
+
+def test_legacy_hosted_recovery_uses_the_project_repository_for_cwd(tmp_path):
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach_hosted(
+        "codex-hosted", "agent-hosted", "codex", "thread-1", 123,
+        str(tmp_path / "old-cwd"), "project-1",
+    )
+    binding = registry.binding("codex-hosted")
+    data = json.loads(binding["data_json"])
+    data.pop("cwd")
+    registry.connection.execute(
+        "UPDATE bindings SET data_json = ? WHERE local_name = ?",
+        (json.dumps(data), "codex-hosted"),
+    )
+    registry.connection.commit()
+    registry.set_project_repository("project-1", str(tmp_path))
+
+    assert registry.recoverable_hosted()[0]["cwd"] == str(tmp_path)
     registry.close()
 
 
