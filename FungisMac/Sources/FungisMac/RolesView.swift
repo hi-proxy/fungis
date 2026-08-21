@@ -570,12 +570,33 @@ private struct AssignmentEditor: View {
                         Text(session.localName).foregroundStyle(.primary)
                         Text(hostedStatusLabel(session)).font(.caption)
                             .foregroundStyle(hostedAssignedRole(session) == nil ? .green : .orange)
+                        if let progress = coordinator.activeTurns[session.id] {
+                            Text(progress.text.isEmpty ? "Codex 작업 중…" : progress.text)
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+                            if let interruptError = progress.interruptError {
+                                Text(interruptError).font(.caption2)
+                                    .foregroundStyle(.red).lineLimit(2)
+                            }
+                        } else if let failure = coordinator.turnFailures[session.id] {
+                            Text(failure).font(.caption2).foregroundStyle(.red).lineLimit(3)
+                        }
                     }
                     Spacer()
                     Text(session.provider.displayName.uppercased())
                         .font(.caption2.bold()).foregroundStyle(.secondary)
                 }.padding(10).contentShape(Rectangle())
             }.buttonStyle(.plain)
+            if let progress = coordinator.activeTurns[session.id] {
+                Button(progress.interruptRequested ? "중단 중…" : "Interrupt") {
+                    Task { await coordinator.interruptTurn(session) }
+                }
+                .buttonStyle(.borderless)
+                .disabled(progress.turnID == nil || progress.interruptRequested)
+                .padding(.trailing, 8)
+            } else if coordinator.turnFailures[session.id] != nil {
+                Button("Retry") { coordinator.retryTurn(session) }
+                    .buttonStyle(.borderless).padding(.trailing, 8)
+            }
             Button("Stop", role: .destructive) { stoppingSession = session }
                 .buttonStyle(.borderless).padding(.trailing, 10)
         }

@@ -114,6 +114,7 @@ enum HostedAgentError: LocalizedError, Sendable {
     case rpc(String)
     case missingLoginURL
     case invalidWorkspace
+    case turnInterrupted
 
     var errorDescription: String? {
         switch self {
@@ -128,9 +129,19 @@ enum HostedAgentError: LocalizedError, Sendable {
             "Codex app-server가 로그인 주소를 보내지 않았습니다."
         case .invalidWorkspace:
             "Hosted session에 사용할 유효한 workspace 폴더를 선택하세요."
+        case .turnInterrupted:
+            "Codex turn이 중단되었습니다. 원본 inbox 메시지는 처리되지 않은 채 남아 있습니다."
         }
     }
 }
+
+enum HostedAgentTurnEvent: Equatable, Sendable {
+    case started(turnID: String)
+    case delta(String)
+    case interruptRejected(String)
+}
+
+typealias HostedTurnEventHandler = @Sendable (HostedAgentTurnEvent) async -> Void
 
 enum HostedWorkspaceDirectory {
     static func validatedPath(
@@ -184,7 +195,10 @@ protocol HostedAgentProviderClient: Sendable {
     func beginChatGPTLogin() async throws -> URL
     func startThread(cwd: String) async throws -> String
     func resumeThread(threadID: String, cwd: String) async throws -> String
-    func runTurn(threadID: String, text: String) async throws -> String
+    func runTurn(
+        threadID: String, text: String, onEvent: HostedTurnEventHandler?
+    ) async throws -> String
+    func interruptTurn(threadID: String, turnID: String) async throws
     func waitForExit() async
     func stop() async
 }
@@ -335,6 +349,14 @@ struct HostedAgentRecoveryRecord: Equatable, Decodable, Sendable {
     }
 }
 
+struct HostedAgentTurnProgress: Equatable, Sendable {
+    let threadID: String
+    var turnID: String?
+    var text: String
+    var interruptRequested: Bool
+    var interruptError: String?
+}
+
 private final class TextBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var value = ""
@@ -351,6 +373,50 @@ private final class TextBuffer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// runTurn은 stdout을 동기식으로 읽는 동안 provider actor를 점유한다. interrupt를
+// 같은 actor 메서드로 보내면 turn이 끝날 때까지 실행되지 않으므로, stdin write만
+// lock으로 직렬화한 별도 경계에서 보낸다.
+private final class HostedJSONLWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var input: FileHandle?
+    private var nextOutOfBandRequestID = -1
+
+    func attach(_ input: FileHandle) {
+        lock.lock()
+        self.input = input
+        nextOutOfBandRequestID = -1
+        lock.unlock()
+    }
+
+    func detach() {
+        lock.lock()
+        input = nil
+        lock.unlock()
+    }
+
+    func write(_ message: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: message) + Data([0x0A])
+        lock.lock()
+        defer { lock.unlock() }
+        guard let input else { throw HostedAgentError.processEnded("") }
+        input.write(data)
+    }
+
+    func interrupt(threadID: String, turnID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let input else { throw HostedAgentError.processEnded("") }
+        let requestID = nextOutOfBandRequestID
+        nextOutOfBandRequestID -= 1
+        let message: [String: Any] = [
+            "method": "turn/interrupt", "id": requestID,
+            "params": ["threadId": threadID, "turnId": turnID],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: message) + Data([0x0A])
+        input.write(data)
     }
 }
 
@@ -380,6 +446,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
     private var nextRequestID = 1
     private var initialized = false
     private let stderrBuffer = TextBuffer()
+    private nonisolated let writer = HostedJSONLWriter()
     private var identity: HostedAgentIdentity?
     private var approvalHandler: HostedApprovalHandler?
     private var exitSignal: HostedProcessExitSignal?
@@ -444,6 +511,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         self.process = process
         self.exitSignal = exitSignal
         input = stdinPipe.fileHandleForWriting
+        writer.attach(stdinPipe.fileHandleForWriting)
         output = stdoutPipe.fileHandleForReading
         errorOutput = stderrPipe.fileHandleForReading
         outputBuffer.removeAll(keepingCapacity: true)
@@ -524,7 +592,9 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         return id
     }
 
-    func runTurn(threadID: String, text: String) async throws -> String {
+    func runTurn(
+        threadID: String, text: String, onEvent: HostedTurnEventHandler? = nil
+    ) async throws -> String {
         let result = try request(
             method: "turn/start",
             params: [
@@ -536,9 +606,19 @@ actor CodexAppServerClient: HostedAgentProviderClient {
               let turnID = turn["id"] as? String else {
             throw HostedAgentError.invalidResponse
         }
+        await onEvent?(.started(turnID: turnID))
         var answer = ""
         while true {
             let message = try readMessage()
+            if let responseID = message["id"] as? NSNumber,
+               responseID.intValue < 0 {
+                if let error = message["error"] as? [String: Any] {
+                    await onEvent?(.interruptRejected(
+                        error["message"] as? String ?? "Codex turn 중단 요청이 거절되었습니다."
+                    ))
+                }
+                continue
+            }
             if let method = message["method"] as? String,
                method.hasSuffix("/requestApproval"),
                let params = message["params"] as? [String: Any] {
@@ -559,11 +639,16 @@ actor CodexAppServerClient: HostedAgentProviderClient {
                params["turnId"] as? String == turnID,
                let delta = params["delta"] as? String {
                 answer += delta
+                await onEvent?(.delta(delta))
             }
             if method == "turn/completed",
                let completed = params["turn"] as? [String: Any],
                completed["id"] as? String == turnID {
-                if completed["status"] as? String == "failed" {
+                let status = completed["status"] as? String
+                if status == "interrupted" {
+                    throw HostedAgentError.turnInterrupted
+                }
+                if status == "failed" {
                     let error = completed["error"] as? [String: Any]
                     throw HostedAgentError.rpc(
                         error?["message"] as? String ?? "Codex turn이 실패했습니다."
@@ -572,6 +657,10 @@ actor CodexAppServerClient: HostedAgentProviderClient {
                 return answer.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
+    }
+
+    nonisolated func interruptTurn(threadID: String, turnID: String) async throws {
+        try writer.interrupt(threadID: threadID, turnID: turnID)
     }
 
     private func answerApproval(
@@ -648,11 +737,10 @@ actor CodexAppServerClient: HostedAgentProviderClient {
     }
 
     private func write(_ message: [String: Any]) throws {
-        guard let input, process?.isRunning == true else {
+        guard process?.isRunning == true else {
             throw HostedAgentError.processEnded(stderrBuffer.text())
         }
-        let data = try JSONSerialization.data(withJSONObject: message)
-        input.write(data + Data([0x0A]))
+        try writer.write(message)
     }
 
     private func readMessage() throws -> [String: Any] {
@@ -680,6 +768,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
 
     private func stopProcess() {
         initialized = false
+        writer.detach()
         input?.closeFile()
         input = nil
         output = nil
@@ -718,6 +807,8 @@ final class HostedAgentCoordinator: ObservableObject {
     @Published private(set) var pendingApprovals: [HostedApprovalRequest] = []
     @Published private(set) var presentedApproval: HostedApprovalRequest?
     @Published private(set) var recoveryFailures: [String: String] = [:]
+    @Published private(set) var activeTurns: [String: HostedAgentTurnProgress] = [:]
+    @Published private(set) var turnFailures: [String: String] = [:]
     @Published var approvalTimeoutMinutes: Int {
         didSet { UserDefaults.standard.set(approvalTimeoutMinutes, forKey: Self.timeoutKey) }
     }
@@ -888,6 +979,8 @@ final class HostedAgentCoordinator: ObservableObject {
         lifecycleTasks.removeValue(forKey: session.id)?.cancel()
         cancelApprovals(for: session.principalID)
         inboxTasks.removeValue(forKey: session.id)?.cancel()
+        activeTurns.removeValue(forKey: session.id)
+        turnFailures.removeValue(forKey: session.id)
         try? await api.disconnectHostedSession(session.principalID, forget: true)
         if let client = clients.removeValue(forKey: session.id) {
             await client.stop()
@@ -920,6 +1013,8 @@ final class HostedAgentCoordinator: ObservableObject {
     ) async {
         guard sessions.contains(where: { $0.id == session.id }) else { return }
         inboxTasks.removeValue(forKey: session.id)?.cancel()
+        activeTurns.removeValue(forKey: session.id)
+        turnFailures.removeValue(forKey: session.id)
         cancelApprovals(for: session.principalID)
         clients.removeValue(forKey: session.id)
         sessions.removeAll { $0.id == session.id }
@@ -1006,6 +1101,50 @@ final class HostedAgentCoordinator: ObservableObject {
         startInbox(session: session, projectID: projectID, client: client)
     }
 
+    func interruptTurn(_ session: HostedAgentSession) async {
+        guard let client = clients[session.id],
+              var progress = activeTurns[session.id],
+              let turnID = progress.turnID,
+              !progress.interruptRequested else { return }
+        // 승인 응답을 기다리는 중이면 runTurn이 provider stdout을 다시 읽지 못한다.
+        // 먼저 해당 session의 승인 waiter를 cancel해 read loop를 풀어 준다.
+        cancelApprovals(for: session.principalID)
+        progress.interruptRequested = true
+        progress.interruptError = nil
+        activeTurns[session.id] = progress
+        do {
+            try await client.interruptTurn(
+                threadID: progress.threadID, turnID: turnID
+            )
+        } catch {
+            progress.interruptRequested = false
+            progress.interruptError = error.localizedDescription
+            activeTurns[session.id] = progress
+        }
+    }
+
+    func retryTurn(_ session: HostedAgentSession) {
+        guard let client = clients[session.id] else { return }
+        turnFailures.removeValue(forKey: session.id)
+        startInbox(session: session, projectID: session.projectID, client: client)
+    }
+
+    private func applyTurnEvent(
+        _ event: HostedAgentTurnEvent, session: HostedAgentSession
+    ) {
+        guard var progress = activeTurns[session.id] else { return }
+        switch event {
+        case let .started(turnID):
+            progress.turnID = turnID
+        case let .delta(delta):
+            progress.text += delta
+        case let .interruptRejected(message):
+            progress.interruptRequested = false
+            progress.interruptError = message
+        }
+        activeTurns[session.id] = progress
+    }
+
     private func startInbox(
         session: HostedAgentSession, projectID: String,
         client: any HostedAgentProviderClient
@@ -1025,9 +1164,24 @@ final class HostedAgentCoordinator: ObservableObject {
                         if let pending = pendingAnswers[message.seq] {
                             answer = pending
                         } else {
-                            answer = try await client.runTurn(
-                                threadID: session.providerSessionID, text: message.body
+                            self.activeTurns[session.id] = HostedAgentTurnProgress(
+                                threadID: session.providerSessionID, turnID: nil,
+                                text: "", interruptRequested: false, interruptError: nil
                             )
+                            do {
+                                answer = try await client.runTurn(
+                                    threadID: session.providerSessionID, text: message.body
+                                ) { [weak self] event in
+                                    await self?.applyTurnEvent(event, session: session)
+                                }
+                            } catch {
+                                self.activeTurns.removeValue(forKey: session.id)
+                                if Task.isCancelled { return }
+                                self.turnFailures[session.id] = error.localizedDescription
+                                return
+                            }
+                            self.activeTurns.removeValue(forKey: session.id)
+                            self.turnFailures.removeValue(forKey: session.id)
                             pendingAnswers[message.seq] = answer
                         }
                         if !answer.isEmpty {

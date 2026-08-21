@@ -131,6 +131,39 @@ import Testing
     await resumed.stop()
 }
 
+@Test func installedCodexAppServerInterruptsARunningTurn() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_INTERRUPT_TEST"] == "1" else {
+        return
+    }
+    let client = CodexAppServerClient()
+    do {
+        _ = try await client.start()
+        let threadID = try await client.startThread(
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+        do {
+            _ = try await client.runTurn(
+                threadID: threadID,
+                text: "Write a detailed essay with at least 2000 words. Do not use tools."
+            ) { event in
+                if case let .started(turnID) = event {
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        try? await client.interruptTurn(threadID: threadID, turnID: turnID)
+                    }
+                }
+            }
+            Issue.record("interrupted turn returned a successful answer")
+        } catch HostedAgentError.turnInterrupted {
+            // Expected: the provider confirms interruption via turn/completed.
+        }
+    } catch {
+        await client.stop()
+        throw error
+    }
+    await client.stop()
+}
+
 @Test func installedCodexToolsReceiveOnlyTheirHostedFungisIdentity() async throws {
     guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_IDENTITY_TEST"] == "1" else {
         return
@@ -235,7 +268,13 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
         resumedThreads.append((threadID, cwd))
         return threadID
     }
-    func runTurn(threadID: String, text: String) async throws -> String { "" }
+    func runTurn(
+        threadID: String, text: String, onEvent: HostedTurnEventHandler?
+    ) async throws -> String {
+        await onEvent?(.started(turnID: "turn-fake"))
+        return ""
+    }
+    func interruptTurn(threadID: String, turnID: String) async throws {}
     func waitForExit() async {
         if exited { return }
         await withCheckedContinuation { exitWaiters.append($0) }
@@ -294,6 +333,58 @@ private final class FakeHostedProviderFactory: @unchecked Sendable {
     }
 }
 
+private actor StreamingFakeHostedProviderClient: HostedAgentProviderClient {
+    private(set) var interrupted: (threadID: String, turnID: String)?
+    private var turnWaiter: CheckedContinuation<Void, Never>?
+    private var exitWaiters: [CheckedContinuation<Void, Never>] = []
+    private var exited = false
+
+    func configure(identity: HostedAgentIdentity) async throws {}
+    func configureApprovalHandler(_ handler: @escaping HostedApprovalHandler) async {}
+    func start() async throws -> HostedAgentAccount { accountValue }
+    func account() async throws -> HostedAgentAccount { accountValue }
+    func beginChatGPTLogin() async throws -> URL { URL(string: "https://example.com")! }
+    func startThread(cwd: String) async throws -> String { "thread-stream" }
+    func resumeThread(threadID: String, cwd: String) async throws -> String { threadID }
+
+    func runTurn(
+        threadID: String, text: String, onEvent: HostedTurnEventHandler?
+    ) async throws -> String {
+        await onEvent?(.started(turnID: "turn-stream"))
+        await onEvent?(.delta("부분 응답"))
+        await withCheckedContinuation { turnWaiter = $0 }
+        throw HostedAgentError.turnInterrupted
+    }
+
+    func interruptTurn(threadID: String, turnID: String) async throws {
+        interrupted = (threadID, turnID)
+        turnWaiter?.resume()
+        turnWaiter = nil
+    }
+
+    func waitForExit() async {
+        if exited { return }
+        await withCheckedContinuation { exitWaiters.append($0) }
+    }
+
+    func stop() async {
+        turnWaiter?.resume()
+        turnWaiter = nil
+        guard !exited else { return }
+        exited = true
+        let waiters = exitWaiters
+        exitWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private var accountValue: HostedAgentAccount {
+        HostedAgentAccount(
+            authentication: .chatGPT(plan: "plus", email: nil),
+            requiresOpenAIAuthentication: true
+        )
+    }
+}
+
 private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     private(set) var connected: [String] = []
     private(set) var disconnected: [String] = []
@@ -302,9 +393,16 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     private(set) var resolvedApprovals: [(String, String, String?)] = []
     private(set) var recoveryRecords: [HostedAgentRecoveryRecord] = []
     private(set) var disconnectForgetValues: [Bool] = []
+    private(set) var inboxMessages: [HostedInboxMessage] = []
+    private(set) var replies: [String] = []
+    private(set) var ackedThrough: [Int] = []
 
     func setRecoveryRecords(_ records: [HostedAgentRecoveryRecord]) {
         recoveryRecords = records
+    }
+
+    func setInboxMessages(_ messages: [HostedInboxMessage]) {
+        inboxMessages = messages
     }
 
     func assignRole(id: String, agentID: String, sendOnboarding: Bool) async throws {
@@ -324,14 +422,18 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
         disconnectForgetValues.append(forget)
     }
 
-    func hostedInbox(principalID: String, after: Int) async throws -> [HostedInboxMessage] { [] }
+    func hostedInbox(principalID: String, after: Int) async throws -> [HostedInboxMessage] {
+        inboxMessages.filter { $0.seq > after }
+    }
 
     func replyFromHosted(
         principalID: String, projectID: String, recipientID: String,
         body: String, inReplyToProjectSeq: Int
-    ) async throws {}
+    ) async throws { replies.append(body) }
 
-    func ackHosted(principalID: String, through: Int) async throws {}
+    func ackHosted(principalID: String, through: Int) async throws {
+        ackedThrough.append(through)
+    }
 
     func createHostedPermission(_ approval: HostedApprovalRequest) async throws -> String {
         createdApprovals.append(approval)
@@ -453,6 +555,48 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     await coordinator.stopFailedRecovery(missingWorkspace.principalID)
     #expect(coordinator.recoveryFailures.isEmpty)
     #expect(await api.disconnectForgetValues == [true, true])
+}
+
+@MainActor
+@Test func hostedTurnStreamsAndInterruptLeavesInboxUnprocessed() async throws {
+    let client = StreamingFakeHostedProviderClient()
+    let api = FakeHostedAgentAPI()
+    await api.setInboxMessages([
+        HostedInboxMessage(
+            seq: 41, projectSeq: 7, senderID: "pm-1", body: "긴 작업"
+        )
+    ])
+    let coordinator = HostedAgentCoordinator(makeCodexClient: { client }, api: api)
+    let session = try await coordinator.createAndAssign(
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1", roleID: "role-1", sendOnboarding: false
+    )
+    for _ in 0..<100 where coordinator.activeTurns[session.id]?.turnID == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let progress = try #require(coordinator.activeTurns[session.id])
+    #expect(progress.turnID == "turn-stream")
+    #expect(progress.text == "부분 응답")
+    await coordinator.interruptTurn(session)
+    for _ in 0..<100 where coordinator.turnFailures[session.id] == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(coordinator.activeTurns[session.id] == nil)
+    #expect(coordinator.turnFailures[session.id]?.contains("중단") == true)
+    #expect(await client.interrupted?.threadID == "thread-stream")
+    #expect(await client.interrupted?.turnID == "turn-stream")
+    #expect(await api.replies.isEmpty)
+    #expect(await api.ackedThrough.isEmpty)
+    coordinator.retryTurn(session)
+    for _ in 0..<100 where coordinator.activeTurns[session.id]?.turnID == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(coordinator.activeTurns[session.id]?.text == "부분 응답")
+    await coordinator.stop(session)
+    #expect(coordinator.activeTurns[session.id] == nil)
+    #expect(coordinator.turnFailures[session.id] == nil)
 }
 
 @MainActor
