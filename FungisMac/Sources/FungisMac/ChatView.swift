@@ -487,6 +487,26 @@ private struct HostedTurnTimelineRows: View {
                         }
                         Text(progress.text.isEmpty ? "Codex가 작업을 시작했습니다…" : progress.text)
                             .textSelection(.enabled)
+                        if !progress.activities.isEmpty {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(progress.activities) { activity in
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Image(systemName: activityIcon(activity.state))
+                                            .foregroundStyle(activityTint(activity.state))
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(activity.title).font(.caption.bold())
+                                            if let detail = activity.detail, !detail.isEmpty {
+                                                Text(detail).font(.caption2)
+                                                    .foregroundStyle(.secondary).lineLimit(3)
+                                                    .textSelection(.enabled)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                        }
                         if let interruptError = progress.interruptError {
                             Text(interruptError).font(.caption2).foregroundStyle(.red)
                         }
@@ -503,6 +523,22 @@ private struct HostedTurnTimelineRows: View {
                 }
                 .frame(maxWidth: 720, alignment: .leading)
             }
+        }
+    }
+
+    private func activityIcon(_ state: HostedAgentActivityState) -> String {
+        switch state {
+        case .running: "hourglass"
+        case .succeeded: "checkmark.circle.fill"
+        case .failed: "xmark.circle.fill"
+        }
+    }
+
+    private func activityTint(_ state: HostedAgentActivityState) -> Color {
+        switch state {
+        case .running: .secondary
+        case .succeeded: .green
+        case .failed: .red
         }
     }
 }

@@ -46,6 +46,22 @@ import Testing
     #expect(model.supportedReasoningEfforts.map(\.effort) == ["medium", "high"])
 }
 
+@Test func hostedToolActivityKeepsCommandBoundaryAndCompletion() throws {
+    let started = try #require(HostedAgentActivity.decode(item: [
+        "id": "item-1", "type": "commandExecution",
+        "command": "swift test", "cwd": "/tmp/project", "status": "inProgress",
+    ], completed: false))
+    let completed = try #require(HostedAgentActivity.decode(item: [
+        "id": "item-1", "type": "commandExecution",
+        "command": "swift test", "cwd": "/tmp/project", "status": "completed",
+    ], completed: true))
+    #expect(started.title == "Command")
+    #expect(started.detail == "swift test")
+    #expect(started.state == .running)
+    #expect(completed.id == started.id)
+    #expect(completed.state == .succeeded)
+}
+
 @Test func legacyHostedRecoveryRecordLeavesModelConfigurationUnset() throws {
     let data = Data("""
     {
@@ -268,6 +284,42 @@ private actor ApprovalRecorder {
     func record(_ request: HostedApprovalRequest) { requests.append(request) }
 }
 
+private actor TurnEventRecorder {
+    private(set) var events: [HostedAgentTurnEvent] = []
+    func record(_ event: HostedAgentTurnEvent) { events.append(event) }
+}
+
+@Test func installedCodexStreamsCommandActivity() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_ACTIVITY_TEST"] == "1" else {
+        return
+    }
+    let client = CodexAppServerClient()
+    let recorder = TurnEventRecorder()
+    do {
+        await client.configureApprovalHandler { _ in .allowOnce }
+        _ = try await client.start()
+        let threadID = try await client.startThread(
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+        _ = try await client.runTurn(
+            threadID: threadID,
+            text: "Run exactly /bin/pwd once, then reply DONE."
+        ) { event in
+            await recorder.record(event)
+        }
+        let activities = await recorder.events.compactMap { event in
+            if case let .activity(activity) = event { return activity }
+            return nil
+        }
+        #expect(activities.contains { $0.title == "Command" && $0.state == .running })
+        #expect(activities.contains { $0.title == "Command" && $0.state == .succeeded })
+    } catch {
+        await client.stop()
+        throw error
+    }
+    await client.stop()
+}
+
 @Test func installedCodexRelaysAnOutOfWorkspaceApprovalRequest() async throws {
     guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_APPROVAL_TEST"] == "1" else {
         return
@@ -434,6 +486,12 @@ private actor StreamingFakeHostedProviderClient: HostedAgentProviderClient {
         threadID: String, text: String, onEvent: HostedTurnEventHandler?
     ) async throws -> String {
         await onEvent?(.started(turnID: "turn-stream"))
+        await onEvent?(.activity(HostedAgentActivity(
+            id: "tool-1", title: "Command", detail: "swift test", state: .running
+        )))
+        await onEvent?(.activity(HostedAgentActivity(
+            id: "tool-1", title: "Command", detail: "swift test", state: .succeeded
+        )))
         await onEvent?(.delta("부분 응답"))
         await withCheckedContinuation { turnWaiter = $0 }
         throw HostedAgentError.turnInterrupted
@@ -674,6 +732,9 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     let progress = try #require(coordinator.activeTurns[session.id])
     #expect(progress.turnID == "turn-stream")
     #expect(progress.text == "부분 응답")
+    #expect(progress.activities == [HostedAgentActivity(
+        id: "tool-1", title: "Command", detail: "swift test", state: .succeeded
+    )])
     await coordinator.interruptTurn(session)
     for _ in 0..<100 where coordinator.turnFailures[session.id] == nil {
         try await Task.sleep(for: .milliseconds(10))

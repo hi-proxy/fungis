@@ -138,7 +138,80 @@ enum HostedAgentError: LocalizedError, Sendable {
 enum HostedAgentTurnEvent: Equatable, Sendable {
     case started(turnID: String)
     case delta(String)
+    case activity(HostedAgentActivity)
     case interruptRejected(String)
+}
+
+enum HostedAgentActivityState: Equatable, Sendable {
+    case running, succeeded, failed
+}
+
+struct HostedAgentActivity: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let detail: String?
+    let state: HostedAgentActivityState
+
+    static func decode(item: [String: Any], completed: Bool) -> HostedAgentActivity? {
+        guard let id = item["id"] as? String, let type = item["type"] as? String else {
+            return nil
+        }
+        let title: String
+        let detail: String?
+        switch type {
+        case "commandExecution":
+            title = "Command"
+            detail = item["command"] as? String
+        case "fileChange":
+            title = "File changes"
+            let paths = (item["changes"] as? [[String: Any]])?
+                .compactMap { $0["path"] as? String }
+            detail = paths?.isEmpty == false ? paths?.joined(separator: ", ") : nil
+        case "mcpToolCall":
+            let server = item["server"] as? String
+            let tool = item["tool"] as? String
+            title = [server, tool].compactMap { $0 }.joined(separator: " · ")
+            detail = compactJSON(item["arguments"])
+        case "dynamicToolCall":
+            title = item["tool"] as? String ?? "Tool"
+            detail = compactJSON(item["arguments"])
+        case "webSearch":
+            title = "Web search"
+            detail = item["query"] as? String
+        case "collabAgentToolCall":
+            title = "Agent · \(item["tool"] as? String ?? "collaboration")"
+            detail = item["prompt"] as? String
+        case "subAgentActivity":
+            title = "Sub-agent"
+            detail = item["agentPath"] as? String
+        case "imageView":
+            title = "View image"
+            detail = item["path"] as? String
+        default:
+            return nil
+        }
+        let status = (item["status"] as? String)?.lowercased()
+        let state: HostedAgentActivityState
+        if ["failed", "declined", "rejected", "error"].contains(status) {
+            state = .failed
+        } else if completed {
+            state = .succeeded
+        } else {
+            state = .running
+        }
+        return HostedAgentActivity(
+            id: id, title: title.isEmpty ? "Tool" : title,
+            detail: detail.map { String($0.prefix(500)) }, state: state
+        )
+    }
+
+    private static func compactJSON(_ value: Any?) -> String? {
+        guard let value, JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else { return value as? String }
+        return text
+    }
 }
 
 struct HostedReasoningOption: Identifiable, Equatable, Sendable {
@@ -452,6 +525,7 @@ struct HostedAgentTurnProgress: Equatable, Sendable {
     let threadID: String
     var turnID: String?
     var text: String
+    var activities: [HostedAgentActivity]
     var interruptRequested: Bool
     var interruptError: String?
 }
@@ -786,6 +860,14 @@ actor CodexAppServerClient: HostedAgentProviderClient {
                let delta = params["delta"] as? String {
                 answer += delta
                 await onEvent?(.delta(delta))
+            }
+            if (method == "item/started" || method == "item/completed"),
+               params["turnId"] as? String == turnID,
+               let item = params["item"] as? [String: Any],
+               let activity = HostedAgentActivity.decode(
+                    item: item, completed: method == "item/completed"
+               ) {
+                await onEvent?(.activity(activity))
             }
             if method == "turn/completed",
                let completed = params["turn"] as? [String: Any],
@@ -1327,6 +1409,13 @@ final class HostedAgentCoordinator: ObservableObject {
             progress.turnID = turnID
         case let .delta(delta):
             progress.text += delta
+        case let .activity(activity):
+            if let index = progress.activities.firstIndex(where: { $0.id == activity.id }) {
+                progress.activities[index] = activity
+            } else {
+                progress.activities.append(activity)
+                if progress.activities.count > 12 { progress.activities.removeFirst() }
+            }
         case let .interruptRejected(message):
             progress.interruptRequested = false
             progress.interruptError = message
@@ -1355,7 +1444,8 @@ final class HostedAgentCoordinator: ObservableObject {
                         } else {
                             self.activeTurns[session.id] = HostedAgentTurnProgress(
                                 threadID: session.providerSessionID, turnID: nil,
-                                text: "", interruptRequested: false, interruptError: nil
+                                text: "", activities: [],
+                                interruptRequested: false, interruptError: nil
                             )
                             do {
                                 answer = try await client.runTurn(

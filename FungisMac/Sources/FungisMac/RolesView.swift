@@ -436,20 +436,32 @@ private struct AssignmentEditor: View {
                 Text("The provider process stops. Any role assignment remains as SESSION OFFLINE.")
             }
             .confirmationDialog(
-                "Stop failed hosted session?",
+                replacingFailedRecovery ? "Replace failed hosted session?"
+                    : "Stop failed hosted session?",
                 isPresented: Binding(
                     get: { stoppingRecoveryPrincipalID != nil },
                     set: { if !$0 { stoppingRecoveryPrincipalID = nil } }
                 ), titleVisibility: .visible
             ) {
-                Button("Stop session", role: .destructive) {
+                Button(replacingFailedRecovery ? "Replace session" : "Stop session", role: .destructive) {
                     guard let principalID = stoppingRecoveryPrincipalID else { return }
+                    let replace = role.agentID == principalID
                     stoppingRecoveryPrincipalID = nil
-                    Task { await coordinator.stopFailedRecovery(principalID) }
+                    Task {
+                        await coordinator.stopFailedRecovery(principalID)
+                        if replace {
+                            hostedPrincipalID = ""
+                            surfaceID = ""
+                            newProvider = .codex
+                            if validWorkspacePath == nil { choosingWorkspace = true }
+                        }
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("The recovery record is removed. Any role assignment remains offline.")
+                Text(replacingFailedRecovery
+                     ? "The broken recovery record is removed. Choose a model, then Create & Assign replaces this role with a new Codex session."
+                     : "The recovery record is removed. Any role assignment remains offline.")
             }
             .fileImporter(
                 isPresented: $choosingWorkspace,
@@ -501,7 +513,7 @@ private struct AssignmentEditor: View {
                             .textSelection(.enabled)
                     }
                     Spacer()
-                    Button("Stop", role: .destructive) {
+                    Button(role.agentID == principalID ? "Replace…" : "Stop", role: .destructive) {
                         stoppingRecoveryPrincipalID = principalID
                     }
                     .buttonStyle(.borderless)
@@ -599,6 +611,16 @@ private struct AssignmentEditor: View {
                         if let progress = coordinator.activeTurns[session.id] {
                             Text(progress.text.isEmpty ? "Codex 작업 중…" : progress.text)
                                 .font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+                            if let activity = progress.activities.last {
+                                Label(
+                                    activity.detail.map { "\(activity.title) · \($0)" }
+                                        ?? activity.title,
+                                    systemImage: activity.state == .running
+                                        ? "hourglass" : activity.state == .succeeded
+                                        ? "checkmark.circle.fill" : "xmark.circle.fill"
+                                )
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                            }
                             if let interruptError = progress.interruptError {
                                 Text(interruptError).font(.caption2)
                                     .foregroundStyle(.red).lineLimit(2)
@@ -870,6 +892,11 @@ private struct AssignmentEditor: View {
         case .starting, .waitingForLogin: true
         case .stopped, .ready, .failed: false
         }
+    }
+
+    private var replacingFailedRecovery: Bool {
+        guard let principalID = stoppingRecoveryPrincipalID else { return false }
+        return role.agentID == principalID
     }
 
     private var hostedSessions: [HostedAgentSession] {
