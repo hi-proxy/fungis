@@ -110,6 +110,17 @@ import Testing
     #expect(items.map(\.text) == ["첫째", "둘째"])
 }
 
+@Test func inlineParenthesisNumbersExposeANumberedList() {
+    let blocks = MessageBlockParser.blocks(of: "정리 1) 첫째 2) 둘째")
+    #expect(blocks.count == 2)
+    guard case let .bullets(items) = blocks[1] else {
+        Issue.record("한 줄 번호 목록을 읽지 못했다: \(blocks)")
+        return
+    }
+    #expect(items.map(\.marker) == ["1.", "2."])
+    #expect(items.map(\.text) == ["첫째", "둘째"])
+}
+
 @Test func headingsNeedASpaceSoTagsSurvive() {
     guard case let .heading(level, text) =
             MessageBlockParser.blocks(of: "## 제목")[0] else {

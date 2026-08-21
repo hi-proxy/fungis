@@ -80,9 +80,51 @@ enum MessagePrettyPrinter {
             cursor = source.index(after: cursor)
         }
 
-        return decoded
+        let normalized = decoded
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+        return splitInlineNumberedItems(normalized)
+    }
+
+    /// `요약 1) 첫째 2) 둘째`처럼 한 줄에 붙은 번호 목록을 블록 parser가
+    /// 읽을 수 있는 줄로 만든다. `함수(1)` 같은 괄호 참조와 code fence는 둔다.
+    private static func splitInlineNumberedItems(_ source: String) -> String {
+        var result = ""
+        var cursor = source.startIndex
+        var inCodeFence = false
+
+        while cursor < source.endIndex {
+            if source[cursor...].hasPrefix("```") {
+                result.append("```")
+                cursor = source.index(cursor, offsetBy: 3)
+                inCodeFence.toggle()
+                continue
+            }
+
+            if !inCodeFence, source[cursor].isNumber,
+               result.last == " " || result.last == "\t" {
+                var end = cursor
+                var digitCount = 0
+                while end < source.endIndex, source[end].isNumber, digitCount < 4 {
+                    digitCount += 1
+                    end = source.index(after: end)
+                }
+                if digitCount <= 3, end < source.endIndex, source[end] == ")" {
+                    let afterMarker = source.index(after: end)
+                    if afterMarker < source.endIndex,
+                       source[afterMarker] == " " || source[afterMarker] == "\t" {
+                        while result.last == " " || result.last == "\t" {
+                            result.removeLast()
+                        }
+                        result.append("\n")
+                    }
+                }
+            }
+
+            result.append(source[cursor])
+            cursor = source.index(after: cursor)
+        }
+        return result
     }
 
     /// 형광펜과 인라인 코드까지 입힌 한 덩이. 블록 안쪽을 그릴 때 쓴다.
