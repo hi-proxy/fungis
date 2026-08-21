@@ -268,6 +268,8 @@ class HostedSessionPayload(BaseModel):
     host_pid: int = Field(gt=0)
     project_id: str = Field(min_length=1)
     cwd: str = Field(min_length=1)
+    model: str | None = Field(default=None, min_length=1)
+    reasoning_effort: str | None = Field(default=None, min_length=1)
 
 
 class HostedReplyPayload(BaseModel):
@@ -829,6 +831,7 @@ def create_web_app(
                     payload.local_name, payload.principal_id,
                     payload.provider, payload.session_id, payload.host_pid,
                     payload.cwd, payload.project_id,
+                    payload.model, payload.reasoning_effort,
                 )
                 pm.registry.set_state(
                     f"active_project:{payload.principal_id}", payload.project_id

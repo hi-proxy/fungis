@@ -116,10 +116,10 @@ struct RolesView: View {
                 if await model.assignHosted(
                     roleID: role.id, session: session, sendOnboarding: onboarding
                 ) { assigningRole = nil }
-            } createHosted: { provider, cwd, onboarding in
+            } createHosted: { provider, cwd, configuration, onboarding in
                 if await model.createHostedAndAssign(
                     provider: provider, roleID: role.id, cwd: cwd,
-                    sendOnboarding: onboarding
+                    sendOnboarding: onboarding, configuration: configuration
                 ) { assigningRole = nil }
             } stopHosted: { session in
                 await model.stopHosted(session)
@@ -330,7 +330,9 @@ private struct AssignmentEditor: View {
     let projectWorkspacePath: String?
     let assign: (String, Bool) async -> Void
     let assignHosted: (HostedAgentSession, Bool) async -> Void
-    let createHosted: (HostedAgentProviderID, String, Bool) async -> Void
+    let createHosted: (
+        HostedAgentProviderID, String, HostedAgentConfiguration, Bool
+    ) async -> Void
     let stopHosted: (HostedAgentSession) async -> Void
     @State private var surfaceID: String
     @State private var hostedPrincipalID: String
@@ -342,6 +344,11 @@ private struct AssignmentEditor: View {
     @State private var creationTask: Task<Void, Never>?
     @State private var workspacePath: String
     @State private var choosingWorkspace = false
+    @State private var availableModels: [HostedModelOption] = []
+    @State private var selectedModelID = ""
+    @State private var selectedReasoningEffort = ""
+    @State private var loadingModels = false
+    @State private var modelError: String?
 
     init(
         role: WorkspaceRole, agents: [AgentTerminal],
@@ -349,7 +356,9 @@ private struct AssignmentEditor: View {
         projectWorkspacePath: String?,
         assign: @escaping (String, Bool) async -> Void,
         assignHosted: @escaping (HostedAgentSession, Bool) async -> Void,
-        createHosted: @escaping (HostedAgentProviderID, String, Bool) async -> Void,
+        createHosted: @escaping (
+            HostedAgentProviderID, String, HostedAgentConfiguration, Bool
+        ) async -> Void,
         stopHosted: @escaping (HostedAgentSession) async -> Void
     ) {
         self.role = role
@@ -452,6 +461,16 @@ private struct AssignmentEditor: View {
                 if accessing { url.stopAccessingSecurityScopedResource() }
             }
             .onDisappear { creationTask?.cancel() }
+            .task(id: newProvider) {
+                guard let provider = newProvider else {
+                    availableModels = []
+                    selectedModelID = ""
+                    selectedReasoningEffort = ""
+                    modelError = nil
+                    return
+                }
+                await loadModels(provider)
+            }
     }
 
     private var sessionList: some View {
@@ -495,7 +514,10 @@ private struct AssignmentEditor: View {
             ForEach(HostedAgentProviderID.allCases) { provider in
                 newHostedSessionRow(provider)
             }
-            if newProvider != nil { workspaceSelection }
+            if newProvider != nil {
+                workspaceSelection
+                modelSelection
+            }
             switch coordinator.creationState {
             case .starting:
                 Label("app-server 시작 중…", systemImage: "hourglass")
@@ -570,6 +592,10 @@ private struct AssignmentEditor: View {
                         Text(session.localName).foregroundStyle(.primary)
                         Text(hostedStatusLabel(session)).font(.caption)
                             .foregroundStyle(hostedAssignedRole(session) == nil ? .green : .orange)
+                        if let model = session.model, let effort = session.reasoningEffort {
+                            Text("\(model) · \(effort)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                         if let progress = coordinator.activeTurns[session.id] {
                             Text(progress.text.isEmpty ? "Codex 작업 중…" : progress.text)
                                 .font(.caption2).foregroundStyle(.secondary).lineLimit(3)
@@ -652,6 +678,44 @@ private struct AssignmentEditor: View {
         .padding(10)
     }
 
+    @ViewBuilder
+    private var modelSelection: some View {
+        if loadingModels {
+            Label("Codex 모델을 불러오는 중…", systemImage: "hourglass")
+                .font(.caption).foregroundStyle(.secondary).padding(10)
+        } else if let modelError {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(modelError).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                Button("Retry") {
+                    guard let provider = newProvider else { return }
+                    Task { await loadModels(provider) }
+                }
+            }.padding(10)
+        } else if !availableModels.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Model", selection: modelSelectionBinding) {
+                    ForEach(availableModels) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+                if let selectedModel {
+                    Text(selectedModel.description)
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Picker("Reasoning", selection: $selectedReasoningEffort) {
+                        ForEach(selectedModel.supportedReasoningEfforts) { option in
+                            Text(option.effort.capitalized).tag(option.effort)
+                        }
+                    }
+                    if let option = selectedModel.supportedReasoningEfforts.first(
+                        where: { $0.effort == selectedReasoningEffort }
+                    ) {
+                        Text(option.description).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }.padding(10)
+        }
+    }
+
     private func displayName(_ agent: AgentTerminal) -> String {
         agent.nickname?.isEmpty == false ? agent.nickname! : agent.title
     }
@@ -685,6 +749,7 @@ private struct AssignmentEditor: View {
             .disabled(
                 (surfaceID.isEmpty && hostedPrincipalID.isEmpty && newProvider == nil)
                     || (newProvider != nil && validWorkspacePath == nil)
+                    || (newProvider != nil && selectedConfiguration == nil)
                     || creationInProgress
             )
     }
@@ -722,8 +787,11 @@ private struct AssignmentEditor: View {
     private func performAssignment() {
         if let newProvider {
             guard let validWorkspacePath else { choosingWorkspace = true; return }
+            guard let selectedConfiguration else { return }
             creationTask = Task {
-                await createHosted(newProvider, validWorkspacePath, sendOnboarding)
+                await createHosted(
+                    newProvider, validWorkspacePath, selectedConfiguration, sendOnboarding
+                )
             }
         } else if let session = selectedHostedSession {
             Task { await assignHosted(session, sendOnboarding) }
@@ -734,6 +802,56 @@ private struct AssignmentEditor: View {
 
     private var validWorkspacePath: String? {
         HostedWorkspaceDirectory.validatedPath(workspacePath)
+    }
+
+    private var selectedModel: HostedModelOption? {
+        availableModels.first { $0.id == selectedModelID }
+    }
+
+    private var selectedConfiguration: HostedAgentConfiguration? {
+        guard let selectedModel,
+              selectedModel.supportedReasoningEfforts.contains(
+                where: { $0.effort == selectedReasoningEffort }
+              )
+        else { return nil }
+        return HostedAgentConfiguration(
+            model: selectedModel.id, reasoningEffort: selectedReasoningEffort
+        )
+    }
+
+    private var modelSelectionBinding: Binding<String> {
+        Binding(
+            get: { selectedModelID },
+            set: { value in
+                selectedModelID = value
+                selectedReasoningEffort = availableModels.first {
+                    $0.id == value
+                }?.defaultReasoningEffort ?? ""
+            }
+        )
+    }
+
+    @MainActor
+    private func loadModels(_ provider: HostedAgentProviderID) async {
+        loadingModels = true
+        modelError = nil
+        availableModels = []
+        selectedModelID = ""
+        selectedReasoningEffort = ""
+        defer { loadingModels = false }
+        do {
+            let models = try await coordinator.availableModels(provider: provider)
+            guard !Task.isCancelled, newProvider == provider else { return }
+            availableModels = models
+            let initial = models.first(where: \.isDefault) ?? models[0]
+            selectedModelID = initial.id
+            selectedReasoningEffort = initial.defaultReasoningEffort
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            modelError = error.localizedDescription
+        }
     }
 
     private func hostedAssignedRole(_ session: HostedAgentSession) -> WorkspaceRole? {

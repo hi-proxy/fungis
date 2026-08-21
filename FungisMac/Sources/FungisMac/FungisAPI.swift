@@ -302,6 +302,8 @@ struct FungisAPI: Sendable {
             let host_pid: Int32
             let project_id: String
             let cwd: String
+            let model: String?
+            let reasoning_effort: String?
         }
         let _: EmptyResponse = try await request(
             "api/hosted-sessions/\(encoded(session.principalID))", method: "PUT",
@@ -309,7 +311,8 @@ struct FungisAPI: Sendable {
                 local_name: session.localName, principal_id: session.principalID,
                 provider: session.provider.rawValue, session_id: session.providerSessionID,
                 host_pid: ProcessInfo.processInfo.processIdentifier,
-                project_id: session.projectID, cwd: session.cwd
+                project_id: session.projectID, cwd: session.cwd,
+                model: session.model, reasoning_effort: session.reasoningEffort
             ), acceptsAnyObject: true
         )
     }

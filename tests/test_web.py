@@ -288,6 +288,8 @@ def test_hosted_session_can_be_assigned_process_inbox_and_reply(tmp_path, monkey
                     "host_pid": os.getpid(),
                     "project_id": "local",
                     "cwd": str(tmp_path),
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "high",
                 },
             )
             assert hosted.status_code == 200
@@ -301,6 +303,8 @@ def test_hosted_session_can_be_assigned_process_inbox_and_reply(tmp_path, monkey
                 "session_id": "thread-1",
                 "cwd": str(tmp_path),
                 "project_id": "local",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
                 "attached": True,
                 "host_pid": os.getpid(),
             }]

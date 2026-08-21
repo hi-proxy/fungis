@@ -31,6 +31,75 @@ import Testing
     #expect(HostedAgentProviderID.allCases.map(\.id) == ["codex", "claude-code"])
 }
 
+@Test func codexModelCatalogKeepsOnlyAdvertisedReasoningChoices() throws {
+    let model = try HostedModelOption.decode([
+        "id": "gpt-5.6-sol", "model": "gpt-5.6-sol",
+        "displayName": "GPT-5.6 Codex", "description": "Frontier coding model",
+        "isDefault": true, "defaultReasoningEffort": "high",
+        "supportedReasoningEfforts": [
+            ["reasoningEffort": "medium", "description": "Balanced"],
+            ["reasoningEffort": "high", "description": "Deeper reasoning"],
+        ],
+    ])
+    #expect(model.id == "gpt-5.6-sol")
+    #expect(model.defaultReasoningEffort == "high")
+    #expect(model.supportedReasoningEfforts.map(\.effort) == ["medium", "high"])
+}
+
+@Test func legacyHostedRecoveryRecordLeavesModelConfigurationUnset() throws {
+    let data = Data("""
+    {
+      "principal_id": "agent-legacy",
+      "local_name": "codex-hosted-legacy",
+      "provider": "codex",
+      "session_id": "thread-legacy",
+      "cwd": "/tmp/project",
+      "project_id": "project-1"
+    }
+    """.utf8)
+    let record = try JSONDecoder().decode(HostedAgentRecoveryRecord.self, from: data)
+    #expect(record.model == nil)
+    #expect(record.reasoningEffort == nil)
+}
+
+@Test func installedCodexAdvertisesModelsAndReasoningChoices() async throws {
+    guard ProcessInfo.processInfo.environment["FUNGIS_RUN_CODEX_MODELS_TEST"] == "1" else {
+        return
+    }
+    let client = CodexAppServerClient()
+    do {
+        _ = try await client.start()
+        let models = try await client.models()
+        #expect(!models.isEmpty)
+        #expect(models.contains { $0.isDefault })
+        #expect(models.allSatisfy { model in
+            model.supportedReasoningEfforts.contains {
+                $0.effort == model.defaultReasoningEffort
+            }
+        })
+        let selected = models.first(where: { $0.isDefault }) ?? models[0]
+        let configuration = HostedAgentConfiguration(
+            model: selected.id, reasoningEffort: selected.defaultReasoningEffort
+        )
+        let threadID = try await client.startThread(
+            cwd: FileManager.default.temporaryDirectory.path,
+            configuration: configuration
+        )
+        _ = try await client.runTurn(
+            threadID: threadID,
+            text: "Reply with exactly MODEL_CONFIGURATION_OK and do not use tools."
+        )
+        #expect(try await client.resumeThread(
+            threadID: threadID, cwd: FileManager.default.temporaryDirectory.path,
+            configuration: configuration
+        ) == threadID)
+    } catch {
+        await client.stop()
+        throw error
+    }
+    await client.stop()
+}
+
 @Test func explicitCodexPathWinsOverFinderPath() throws {
     let directory = FileManager.default.temporaryDirectory
         .appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -247,6 +316,8 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
     private(set) var stopped = false
     private(set) var startedCwds: [String] = []
     private(set) var resumedThreads: [(String, String)] = []
+    private(set) var startedConfigurations: [HostedAgentConfiguration?] = []
+    private(set) var resumedConfigurations: [HostedAgentConfiguration?] = []
     private var approvalHandler: HostedApprovalHandler?
     private var exited = false
     private var exitWaiters: [CheckedContinuation<Void, Never>] = []
@@ -264,9 +335,21 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
         startedCwds.append(cwd)
         return threadID
     }
+    func startThread(
+        cwd: String, configuration: HostedAgentConfiguration?
+    ) async throws -> String {
+        startedConfigurations.append(configuration)
+        return try await startThread(cwd: cwd)
+    }
     func resumeThread(threadID: String, cwd: String) async throws -> String {
         resumedThreads.append((threadID, cwd))
         return threadID
+    }
+    func resumeThread(
+        threadID: String, cwd: String, configuration: HostedAgentConfiguration?
+    ) async throws -> String {
+        resumedConfigurations.append(configuration)
+        return try await resumeThread(threadID: threadID, cwd: cwd)
     }
     func runTurn(
         threadID: String, text: String, onEvent: HostedTurnEventHandler?
@@ -479,7 +562,10 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     let first = try await coordinator.createAndAssign(
         provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
         projectID: "project-1",
-        roleID: "role-1", sendOnboarding: true
+        roleID: "role-1", sendOnboarding: true,
+        configuration: HostedAgentConfiguration(
+            model: "gpt-5.6-sol", reasoningEffort: "high"
+        )
     )
     let second = try await coordinator.createAndAssign(
         provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
@@ -491,6 +577,11 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     #expect(first.principalID != second.principalID)
     #expect(first.providerSessionID == "thread-1")
     #expect(second.providerSessionID == "thread-2")
+    #expect(first.model == "gpt-5.6-sol")
+    #expect(first.reasoningEffort == "high")
+    #expect(await factory.client(at: 0).startedConfigurations == [
+        HostedAgentConfiguration(model: "gpt-5.6-sol", reasoningEffort: "high")
+    ])
     let connected = await api.connected
     let assignments = await api.assignments
     #expect(connected == [first.principalID, second.principalID])
@@ -517,7 +608,8 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     let valid = HostedAgentRecoveryRecord(
         principalID: "agent-hosted-restored", localName: "codex-hosted-restored",
         provider: .codex, providerSessionID: "thread-existing",
-        cwd: workspace.path, projectID: "project-1"
+        cwd: workspace.path, projectID: "project-1",
+        model: "gpt-5.6-sol", reasoningEffort: "xhigh"
     )
     let missingWorkspace = HostedAgentRecoveryRecord(
         principalID: "agent-hosted-missing", localName: "codex-hosted-missing",
@@ -534,7 +626,8 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     #expect(coordinator.sessions == [HostedAgentSession(
         principalID: valid.principalID, localName: valid.localName,
         provider: valid.provider, providerSessionID: valid.providerSessionID,
-        cwd: workspace.path, projectID: "project-1"
+        cwd: workspace.path, projectID: "project-1",
+        model: "gpt-5.6-sol", reasoningEffort: "xhigh"
     )])
     #expect(coordinator.recoveryFailures[missingWorkspace.principalID] != nil)
     #expect(factory.count == 1)
@@ -543,6 +636,9 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     #expect(resumed.count == 1)
     #expect(resumed.first?.0 == "thread-existing")
     #expect(resumed.first?.1 == workspace.path)
+    #expect(await factory.client(at: 0).resumedConfigurations == [
+        HostedAgentConfiguration(model: "gpt-5.6-sol", reasoningEffort: "xhigh")
+    ])
     #expect(await factory.client(at: 0).identity == HostedAgentIdentity(
         principalID: valid.principalID, projectID: "project-1"
     ))

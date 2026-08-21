@@ -141,6 +141,50 @@ enum HostedAgentTurnEvent: Equatable, Sendable {
     case interruptRejected(String)
 }
 
+struct HostedReasoningOption: Identifiable, Equatable, Sendable {
+    let effort: String
+    let description: String
+    var id: String { effort }
+}
+
+struct HostedModelOption: Identifiable, Equatable, Sendable {
+    let id: String
+    let displayName: String
+    let description: String
+    let isDefault: Bool
+    let defaultReasoningEffort: String
+    let supportedReasoningEfforts: [HostedReasoningOption]
+
+    static func decode(_ value: [String: Any]) throws -> HostedModelOption {
+        guard let id = (value["model"] as? String) ?? (value["id"] as? String),
+              let displayName = value["displayName"] as? String,
+              let description = value["description"] as? String,
+              let isDefault = value["isDefault"] as? Bool,
+              let defaultEffort = value["defaultReasoningEffort"] as? String,
+              let rawEfforts = value["supportedReasoningEfforts"] as? [[String: Any]]
+        else { throw HostedAgentError.invalidResponse }
+        let efforts = try rawEfforts.map { option in
+            guard let effort = option["reasoningEffort"] as? String,
+                  let description = option["description"] as? String
+            else { throw HostedAgentError.invalidResponse }
+            return HostedReasoningOption(effort: effort, description: description)
+        }
+        guard !efforts.isEmpty, efforts.contains(where: { $0.effort == defaultEffort }) else {
+            throw HostedAgentError.invalidResponse
+        }
+        return HostedModelOption(
+            id: id, displayName: displayName, description: description,
+            isDefault: isDefault, defaultReasoningEffort: defaultEffort,
+            supportedReasoningEfforts: efforts
+        )
+    }
+}
+
+struct HostedAgentConfiguration: Equatable, Sendable {
+    let model: String
+    let reasoningEffort: String
+}
+
 typealias HostedTurnEventHandler = @Sendable (HostedAgentTurnEvent) async -> Void
 
 enum HostedWorkspaceDirectory {
@@ -193,14 +237,33 @@ protocol HostedAgentProviderClient: Sendable {
     func start() async throws -> HostedAgentAccount
     func account() async throws -> HostedAgentAccount
     func beginChatGPTLogin() async throws -> URL
+    func models() async throws -> [HostedModelOption]
     func startThread(cwd: String) async throws -> String
+    func startThread(cwd: String, configuration: HostedAgentConfiguration?) async throws -> String
     func resumeThread(threadID: String, cwd: String) async throws -> String
+    func resumeThread(
+        threadID: String, cwd: String, configuration: HostedAgentConfiguration?
+    ) async throws -> String
     func runTurn(
         threadID: String, text: String, onEvent: HostedTurnEventHandler?
     ) async throws -> String
     func interruptTurn(threadID: String, turnID: String) async throws
     func waitForExit() async
     func stop() async
+}
+
+extension HostedAgentProviderClient {
+    func models() async throws -> [HostedModelOption] { [] }
+    func startThread(
+        cwd: String, configuration: HostedAgentConfiguration?
+    ) async throws -> String {
+        try await startThread(cwd: cwd)
+    }
+    func resumeThread(
+        threadID: String, cwd: String, configuration: HostedAgentConfiguration?
+    ) async throws -> String {
+        try await resumeThread(threadID: threadID, cwd: cwd)
+    }
 }
 
 typealias HostedApprovalHandler = @Sendable (HostedApprovalRequest) async -> HostedApprovalDecision
@@ -328,7 +391,24 @@ struct HostedAgentSession: Identifiable, Equatable, Sendable {
     let providerSessionID: String
     let cwd: String
     let projectID: String
+    let model: String?
+    let reasoningEffort: String?
     var id: String { principalID }
+
+    init(
+        principalID: String, localName: String, provider: HostedAgentProviderID,
+        providerSessionID: String, cwd: String, projectID: String,
+        model: String? = nil, reasoningEffort: String? = nil
+    ) {
+        self.principalID = principalID
+        self.localName = localName
+        self.provider = provider
+        self.providerSessionID = providerSessionID
+        self.cwd = cwd
+        self.projectID = projectID
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+    }
 }
 
 struct HostedAgentRecoveryRecord: Equatable, Decodable, Sendable {
@@ -338,6 +418,8 @@ struct HostedAgentRecoveryRecord: Equatable, Decodable, Sendable {
     let providerSessionID: String
     let cwd: String?
     let projectID: String?
+    let model: String?
+    let reasoningEffort: String?
 
     private enum CodingKeys: String, CodingKey {
         case principalID = "principal_id"
@@ -346,6 +428,23 @@ struct HostedAgentRecoveryRecord: Equatable, Decodable, Sendable {
         case providerSessionID = "session_id"
         case cwd
         case projectID = "project_id"
+        case model
+        case reasoningEffort = "reasoning_effort"
+    }
+
+    init(
+        principalID: String, localName: String, provider: HostedAgentProviderID,
+        providerSessionID: String, cwd: String?, projectID: String?,
+        model: String? = nil, reasoningEffort: String? = nil
+    ) {
+        self.principalID = principalID
+        self.localName = localName
+        self.provider = provider
+        self.providerSessionID = providerSessionID
+        self.cwd = cwd
+        self.projectID = projectID
+        self.model = model
+        self.reasoningEffort = reasoningEffort
     }
 }
 
@@ -524,7 +623,8 @@ actor CodexAppServerClient: HostedAgentProviderClient {
                     "name": "fungis_mac",
                     "title": "Fungis",
                     "version": "0.1.0",
-                ]
+                ],
+                "capabilities": ["experimentalApi": true],
             ]
         )
         try notify(method: "initialized", params: [:])
@@ -555,16 +655,40 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         return url
     }
 
-    func startThread(cwd: String) async throws -> String {
+    func models() async throws -> [HostedModelOption] {
         if !initialized || process?.isRunning != true { _ = try await start() }
+        var models: [HostedModelOption] = []
+        var cursor: String?
+        repeat {
+            var params: [String: Any] = ["includeHidden": false]
+            if let cursor { params["cursor"] = cursor }
+            let result = try request(method: "model/list", params: params)
+            guard let data = result["data"] as? [[String: Any]] else {
+                throw HostedAgentError.invalidResponse
+            }
+            models += try data.map(HostedModelOption.decode)
+            cursor = result["nextCursor"] as? String
+        } while cursor != nil
+        return models
+    }
+
+    func startThread(
+        cwd: String, configuration: HostedAgentConfiguration? = nil
+    ) async throws -> String {
+        if !initialized || process?.isRunning != true { _ = try await start() }
+        var params: [String: Any] = [
+            "cwd": cwd,
+            "approvalPolicy": "untrusted",
+            "sandbox": "workspace-write",
+            "ephemeral": false,
+        ]
+        if let configuration {
+            params["model"] = configuration.model
+            params["config"] = ["model_reasoning_effort": configuration.reasoningEffort]
+        }
         let result = try request(
             method: "thread/start",
-            params: [
-                "cwd": cwd,
-                "approvalPolicy": "untrusted",
-                "sandbox": "workspace-write",
-                "ephemeral": false,
-            ]
+            params: params
         )
         guard let thread = result["thread"] as? [String: Any],
               let id = thread["id"] as? String else {
@@ -573,23 +697,45 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         return id
     }
 
-    func resumeThread(threadID: String, cwd: String) async throws -> String {
+    func startThread(cwd: String) async throws -> String {
+        try await startThread(cwd: cwd, configuration: nil)
+    }
+
+    func resumeThread(
+        threadID: String, cwd: String, configuration: HostedAgentConfiguration? = nil
+    ) async throws -> String {
         if !initialized || process?.isRunning != true { _ = try await start() }
+        var params: [String: Any] = [
+            "threadId": threadID,
+            "cwd": cwd,
+            "approvalPolicy": "untrusted",
+            "sandbox": "workspace-write",
+        ]
+        if let configuration { params["model"] = configuration.model }
         let result = try request(
             method: "thread/resume",
-            params: [
-                "threadId": threadID,
-                "cwd": cwd,
-                "approvalPolicy": "untrusted",
-                "sandbox": "workspace-write",
-            ]
+            params: params
         )
         guard let thread = result["thread"] as? [String: Any],
               let id = thread["id"] as? String,
               id == threadID else {
             throw HostedAgentError.invalidResponse
         }
+        if let configuration {
+            _ = try request(
+                method: "thread/settings/update",
+                params: [
+                    "threadId": threadID,
+                    "model": configuration.model,
+                    "effort": configuration.reasoningEffort,
+                ]
+            )
+        }
         return id
+    }
+
+    func resumeThread(threadID: String, cwd: String) async throws -> String {
+        try await resumeThread(threadID: threadID, cwd: cwd, configuration: nil)
     }
 
     func runTurn(
@@ -838,7 +984,8 @@ final class HostedAgentCoordinator: ObservableObject {
 
     func createAndAssign(
         provider: HostedAgentProviderID, cwd: String, projectID: String,
-        roleID: String, sendOnboarding: Bool
+        roleID: String, sendOnboarding: Bool,
+        configuration: HostedAgentConfiguration? = nil
     ) async throws -> HostedAgentSession {
         guard provider == .codex else {
             throw HostedAgentError.rpc("Claude Code hosted session은 아직 지원하지 않습니다.")
@@ -880,12 +1027,13 @@ final class HostedAgentCoordinator: ObservableObject {
             }
             creationState = .ready(account)
 
-            let threadID = try await client.startThread(cwd: cwd)
+            let threadID = try await client.startThread(cwd: cwd, configuration: configuration)
             let suffix = String(threadID.prefix(8))
             let session = HostedAgentSession(
                 principalID: identity.principalID,
                 localName: "codex-hosted-\(suffix)", provider: .codex,
-                providerSessionID: threadID, cwd: cwd, projectID: projectID
+                providerSessionID: threadID, cwd: cwd, projectID: projectID,
+                model: configuration?.model, reasoningEffort: configuration?.reasoningEffort
             )
             try await api.connectHostedSession(session)
             clients[session.id] = client
@@ -909,6 +1057,40 @@ final class HostedAgentCoordinator: ObservableObject {
                 await client.stop()
             }
             creationState = .failed(error.localizedDescription)
+            throw error
+        }
+    }
+
+    func availableModels(provider: HostedAgentProviderID) async throws -> [HostedModelOption] {
+        guard provider == .codex else {
+            throw HostedAgentError.rpc("Claude Code hosted session은 아직 지원하지 않습니다.")
+        }
+        let client = makeCodexClient()
+        do {
+            var account = try await client.start()
+            if !account.authentication.isChatGPT {
+                creationState = .waitingForLogin
+                let url = try await client.beginChatGPTLogin()
+                NSWorkspace.shared.open(url)
+                for _ in 0..<60 {
+                    try await Task.sleep(for: .seconds(2))
+                    account = try await client.account()
+                    if account.authentication.isChatGPT { break }
+                }
+                guard account.authentication.isChatGPT else {
+                    throw HostedAgentError.rpc("ChatGPT 로그인을 확인하지 못했습니다.")
+                }
+            }
+            let models = try await client.models()
+            guard !models.isEmpty else {
+                throw HostedAgentError.rpc("선택 가능한 Codex 모델이 없습니다.")
+            }
+            await client.stop()
+            creationState = .stopped
+            return models
+        } catch {
+            await client.stop()
+            creationState = .stopped
             throw error
         }
     }
@@ -939,7 +1121,8 @@ final class HostedAgentCoordinator: ObservableObject {
             let session = HostedAgentSession(
                 principalID: record.principalID, localName: record.localName,
                 provider: record.provider, providerSessionID: record.providerSessionID,
-                cwd: cwd, projectID: projectID
+                cwd: cwd, projectID: projectID,
+                model: record.model, reasoningEffort: record.reasoningEffort
             )
             let client = makeCodexClient()
             do {
@@ -958,8 +1141,14 @@ final class HostedAgentCoordinator: ObservableObject {
                         "저장된 Codex session을 복구하려면 ChatGPT 로그인이 필요합니다."
                     )
                 }
+                let configuration = session.model.flatMap { model in
+                    session.reasoningEffort.map {
+                        HostedAgentConfiguration(model: model, reasoningEffort: $0)
+                    }
+                }
                 _ = try await client.resumeThread(
-                    threadID: session.providerSessionID, cwd: session.cwd
+                    threadID: session.providerSessionID, cwd: session.cwd,
+                    configuration: configuration
                 )
                 try await api.connectHostedSession(session)
                 clients[session.id] = client

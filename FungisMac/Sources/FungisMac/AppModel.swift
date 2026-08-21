@@ -225,14 +225,15 @@ final class AppModel: ObservableObject {
 
     func createHostedAndAssign(
         provider: HostedAgentProviderID, roleID: String, cwd: String,
-        sendOnboarding: Bool
+        sendOnboarding: Bool, configuration: HostedAgentConfiguration
     ) async -> Bool {
         isMutating = true
         defer { isMutating = false }
         do {
             _ = try await hostedAgents.createAndAssign(
                 provider: provider, cwd: cwd, projectID: selectedProjectID,
-                roleID: roleID, sendOnboarding: sendOnboarding
+                roleID: roleID, sendOnboarding: sendOnboarding,
+                configuration: configuration
             )
             apply(try await api.state(projectID: selectedProjectID))
             return true

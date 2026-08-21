@@ -278,6 +278,7 @@ class LocalRegistry:
     def attach_hosted(
         self, local_name: str, principal_id: str, provider: str, session_id: str,
         host_pid: int, cwd: str, project_id: str,
+        model: str | None = None, reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         data = {
             "terminal_provider": "fungis-app",
@@ -286,6 +287,8 @@ class LocalRegistry:
             "host_pid": host_pid,
             "cwd": cwd,
             "project_id": project_id,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
         }
         self.connection.execute(
             """
@@ -336,6 +339,8 @@ class LocalRegistry:
                 "session_id": value["agent_session_id"],
                 "cwd": data.get("cwd") or (repository or {}).get("path"),
                 "project_id": project_id,
+                "model": data.get("model"),
+                "reasoning_effort": data.get("reasoning_effort"),
                 "attached": bool(value["attached"]),
                 "host_pid": data.get("host_pid"),
             })
