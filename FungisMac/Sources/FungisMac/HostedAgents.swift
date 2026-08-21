@@ -184,6 +184,7 @@ protocol HostedAgentProviderClient: Sendable {
     func beginChatGPTLogin() async throws -> URL
     func startThread(cwd: String) async throws -> String
     func runTurn(threadID: String, text: String) async throws -> String
+    func waitForExit() async
     func stop() async
 }
 
@@ -334,6 +335,22 @@ private final class TextBuffer: @unchecked Sendable {
     }
 }
 
+private final class HostedProcessExitSignal: @unchecked Sendable {
+    let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let pair = AsyncStream<Void>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func finish() {
+        continuation.yield(())
+        continuation.finish()
+    }
+}
+
 actor CodexAppServerClient: HostedAgentProviderClient {
     private let executableURL: URL?
     private var process: Process?
@@ -346,6 +363,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
     private let stderrBuffer = TextBuffer()
     private var identity: HostedAgentIdentity?
     private var approvalHandler: HostedApprovalHandler?
+    private var exitSignal: HostedProcessExitSignal?
 
     init(executableURL: URL? = HostedExecutableResolver.codexURL()) {
         self.executableURL = executableURL
@@ -395,9 +413,17 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         stderrPipe.fileHandleForReading.readabilityHandler = { [stderrBuffer] handle in
             stderrBuffer.append(handle.availableData)
         }
-        try process.run()
+        let exitSignal = HostedProcessExitSignal()
+        process.terminationHandler = { _ in exitSignal.finish() }
+        do {
+            try process.run()
+        } catch {
+            exitSignal.finish()
+            throw error
+        }
 
         self.process = process
+        self.exitSignal = exitSignal
         input = stdinPipe.fileHandleForWriting
         output = stdoutPipe.fileHandleForReading
         errorOutput = stderrPipe.fileHandleForReading
@@ -547,6 +573,11 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         stopProcess()
     }
 
+    func waitForExit() async {
+        guard let exitSignal else { return }
+        for await _ in exitSignal.stream { return }
+    }
+
     private func readAccount() throws -> HostedAgentAccount {
         let result = try request(
             method: "account/read", params: ["refreshToken": false]
@@ -618,6 +649,7 @@ actor CodexAppServerClient: HostedAgentProviderClient {
         errorOutput = nil
         if let process, process.isRunning { process.terminate() }
         self.process = nil
+        exitSignal = nil
     }
 }
 
@@ -652,6 +684,7 @@ final class HostedAgentCoordinator: ObservableObject {
     private let makeCodexClient: @Sendable () -> any HostedAgentProviderClient
     private var clients: [String: any HostedAgentProviderClient] = [:]
     private var inboxTasks: [String: Task<Void, Never>] = [:]
+    private var lifecycleTasks: [String: Task<Void, Never>] = [:]
     private var approvalWaiters: [
         String: CheckedContinuation<HostedApprovalDecision, Never>
     ] = [:]
@@ -724,6 +757,7 @@ final class HostedAgentCoordinator: ObservableObject {
             try await api.connectHostedSession(session)
             clients[session.id] = client
             sessions.append(session)
+            watchLifecycle(session: session, client: client)
 
             try await assign(
                 session: session, roleID: roleID, projectID: projectID,
@@ -747,6 +781,7 @@ final class HostedAgentCoordinator: ObservableObject {
     }
 
     func stop(_ session: HostedAgentSession) async {
+        lifecycleTasks.removeValue(forKey: session.id)?.cancel()
         cancelApprovals(for: session.principalID)
         inboxTasks.removeValue(forKey: session.id)?.cancel()
         try? await api.disconnectHostedSession(session.principalID)
@@ -754,6 +789,40 @@ final class HostedAgentCoordinator: ObservableObject {
             await client.stop()
         }
         sessions.removeAll { $0.id == session.id }
+    }
+
+    private func watchLifecycle(
+        session: HostedAgentSession, client: any HostedAgentProviderClient
+    ) {
+        lifecycleTasks[session.id]?.cancel()
+        lifecycleTasks[session.id] = Task { [weak self] in
+            await client.waitForExit()
+            guard !Task.isCancelled, let self else { return }
+            await self.providerExited(session, client: client)
+        }
+    }
+
+    private func providerExited(
+        _ session: HostedAgentSession, client: any HostedAgentProviderClient
+    ) async {
+        guard sessions.contains(where: { $0.id == session.id }) else { return }
+        inboxTasks.removeValue(forKey: session.id)?.cancel()
+        cancelApprovals(for: session.principalID)
+        clients.removeValue(forKey: session.id)
+        sessions.removeAll { $0.id == session.id }
+        await client.stop()
+
+        // local node가 app-server와 동시에 흔들려도 binding을 online으로 남기지
+        // 않는다. 앱이 살아 있는 동안 재시도하고, 앱 종료는 task를 함께 끝낸다.
+        while !Task.isCancelled {
+            do {
+                try await api.disconnectHostedSession(session.principalID)
+                break
+            } catch {
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        lifecycleTasks.removeValue(forKey: session.id)
     }
 
     func showNextApproval() {

@@ -182,6 +182,8 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
     private(set) var identity: HostedAgentIdentity?
     private(set) var stopped = false
     private var approvalHandler: HostedApprovalHandler?
+    private var exited = false
+    private var exitWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(threadID: String) { self.threadID = threadID }
 
@@ -194,7 +196,24 @@ private actor FakeHostedProviderClient: HostedAgentProviderClient {
     func beginChatGPTLogin() async throws -> URL { URL(string: "https://example.com/login")! }
     func startThread(cwd: String) async throws -> String { threadID }
     func runTurn(threadID: String, text: String) async throws -> String { "" }
-    func stop() async { stopped = true }
+    func waitForExit() async {
+        if exited { return }
+        await withCheckedContinuation { exitWaiters.append($0) }
+    }
+    func stop() async {
+        stopped = true
+        finishExit()
+    }
+
+    func crash() { finishExit() }
+
+    private func finishExit() {
+        guard !exited else { return }
+        exited = true
+        let waiters = exitWaiters
+        exitWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
 
     func askForApproval(_ request: HostedApprovalRequest) async -> HostedApprovalDecision {
         await approvalHandler?(request) ?? .cancel
@@ -366,4 +385,69 @@ private actor FakeHostedAgentAPI: HostedAgentAPIClient {
     #expect(await decisionTask.value == .allowSession)
     #expect(coordinator.pendingApprovals.isEmpty)
     await coordinator.stop(session)
+}
+
+@MainActor
+@Test func crashedHostedProcessGoesOfflineAndCancelsItsApproval() async throws {
+    let factory = FakeHostedProviderFactory()
+    let api = FakeHostedAgentAPI()
+    let coordinator = HostedAgentCoordinator(makeCodexClient: { factory.make() }, api: api)
+    coordinator.approvalTimeoutMinutes = 0
+    let session = try await coordinator.createAndAssign(
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1", roleID: "role-1", sendOnboarding: false
+    )
+    let approval = try HostedApprovalRequest.decode(
+        method: "item/commandExecution/requestApproval", requestID: .string("approval-1"),
+        params: [
+            "threadId": session.providerSessionID, "turnId": "turn-1",
+            "itemId": "item-1", "command": ["curl", "example.com"],
+        ],
+        identity: HostedAgentIdentity(
+            principalID: session.principalID, projectID: session.projectID
+        )
+    )
+    let decisionTask = Task {
+        await factory.client(at: 0).askForApproval(approval)
+    }
+    for _ in 0..<100 where coordinator.pendingApprovals.isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(coordinator.pendingApprovals.count == 1)
+
+    await factory.client(at: 0).crash()
+    for _ in 0..<100 where !coordinator.sessions.isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(coordinator.sessions.isEmpty)
+    #expect(coordinator.pendingApprovals.isEmpty)
+    #expect(await decisionTask.value == .cancel)
+    #expect(await api.disconnected == [session.principalID])
+    #expect(await factory.client(at: 0).stopped)
+}
+
+@MainActor
+@Test func oneHostedCrashDoesNotStopAnotherSession() async throws {
+    let factory = FakeHostedProviderFactory()
+    let api = FakeHostedAgentAPI()
+    let coordinator = HostedAgentCoordinator(makeCodexClient: { factory.make() }, api: api)
+    let first = try await coordinator.createAndAssign(
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1", roleID: "role-1", sendOnboarding: false
+    )
+    let second = try await coordinator.createAndAssign(
+        provider: .codex, cwd: FileManager.default.temporaryDirectory.path,
+        projectID: "project-1", roleID: "role-2", sendOnboarding: false
+    )
+
+    await factory.client(at: 0).crash()
+    for _ in 0..<100 where coordinator.sessions.count == 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(coordinator.sessions == [second])
+    #expect(await api.disconnected == [first.principalID])
+    #expect(!(await factory.client(at: 1).stopped))
+    await coordinator.stop(second)
 }
