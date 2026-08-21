@@ -34,9 +34,7 @@ enum MessageBlockParser {
     /// 마크다운 전부를 읽지 않는다. 에이전트와 PM 이 실제로 치는 것만 읽고,
     /// 못 읽은 줄은 문단으로 흘려보낸다 — 모르는 문법을 만나도 글자는 남는다.
     static func blocks(of source: String) -> [MessageBlock] {
-        let lines = source
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = MessagePrettyPrinter.layoutText(source)
             .components(separatedBy: "\n")
 
         var blocks: [MessageBlock] = []

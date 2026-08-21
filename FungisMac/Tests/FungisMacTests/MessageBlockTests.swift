@@ -99,6 +99,17 @@ import Testing
     #expect(numbered.map(\.marker) == ["1.", "2."])
 }
 
+@Test func escapedNewlinesExposeParenthesisNumberedLists() {
+    let blocks = MessageBlockParser.blocks(of: "요약\\n\\n1) 첫째\\n2) 둘째")
+    #expect(blocks.count == 2)
+    guard case let .bullets(items) = blocks[1] else {
+        Issue.record("escaped newline 뒤 번호 목록을 읽지 못했다: \(blocks)")
+        return
+    }
+    #expect(items.map(\.marker) == ["1.", "2."])
+    #expect(items.map(\.text) == ["첫째", "둘째"])
+}
+
 @Test func headingsNeedASpaceSoTagsSurvive() {
     guard case let .heading(level, text) =
             MessageBlockParser.blocks(of: "## 제목")[0] else {

@@ -6,9 +6,7 @@ enum MessagePrettyPrinter {
     )
 
     static func format(_ source: String) -> String {
-        let normalized = source
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+        let normalized = layoutText(source)
         var result = ""
         var isAtLineStart = true
 
@@ -32,6 +30,59 @@ enum MessagePrettyPrinter {
         }
 
         return result
+    }
+
+    /// shell/JSON 경계를 거치며 글자 두 개 `\\n`으로 남은 줄바꿈을 Pretty에서만
+    /// 복원한다. 원문은 저장된 그대로 남고, 코드 울타리 안의 escape도 코드이므로
+    /// 건드리지 않는다. `\\\\n`처럼 escape된 역슬래시도 줄바꿈으로 오인하지 않는다.
+    static func layoutText(_ source: String) -> String {
+        var decoded = ""
+        var cursor = source.startIndex
+        var inCodeFence = false
+
+        while cursor < source.endIndex {
+            if source[cursor...].hasPrefix("```") {
+                decoded.append("```")
+                cursor = source.index(cursor, offsetBy: 3)
+                inCodeFence.toggle()
+                continue
+            }
+
+            let character = source[cursor]
+            if character == "\\", !inCodeFence {
+                let next = source.index(after: cursor)
+                if next < source.endIndex {
+                    if source[next] == "\\" {
+                        decoded.append("\\\\")
+                        cursor = source.index(after: next)
+                        continue
+                    }
+                    if source[next] == "n" {
+                        decoded.append("\n")
+                        cursor = source.index(after: next)
+                        continue
+                    }
+                    if source[next] == "r" {
+                        var afterEscape = source.index(after: next)
+                        if afterEscape < source.endIndex, source[afterEscape] == "\\" {
+                            let possibleN = source.index(after: afterEscape)
+                            if possibleN < source.endIndex, source[possibleN] == "n" {
+                                afterEscape = source.index(after: possibleN)
+                            }
+                        }
+                        decoded.append("\n")
+                        cursor = afterEscape
+                        continue
+                    }
+                }
+            }
+            decoded.append(character)
+            cursor = source.index(after: cursor)
+        }
+
+        return decoded
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 
     /// 형광펜과 인라인 코드까지 입힌 한 덩이. 블록 안쪽을 그릴 때 쓴다.
