@@ -1161,6 +1161,46 @@ def test_hq_addresses_a_room_by_name_and_reaches_its_lead(tmp_path):
         assert message.json()["recipient_ids"] == ["lead"]
 
 
+def test_a_person_can_hold_a_role_and_is_not_told_to_run_init(tmp_path):
+    """사람도 역할을 맡는다. 역할이 참가의 전제라 여기서 막으면 사람을 방
+    하나에만 넣을 수 없다.
+
+    다만 온보딩은 `fungis init` 을 치라는 안내다. 사람에게는 칠 터미널이 없다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("helper", "human"), ("bot", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "alpha", "name": "alpha"})
+
+        def assign(name, agent_id):
+            role = client.post(
+                "/v1/workspaces/alpha/roles", json={"name": name}
+            ).json()
+            return client.put(
+                f"/v1/roles/{role['id']}/assignment",
+                json={"agent_id": agent_id, "assigned_by": "pm",
+                      "send_onboarding": True},
+            )
+
+        assert assign("helper-role", "helper").status_code == 200
+        assert assign("bot-role", "bot").status_code == 200
+
+        # 사람도 그 방을 읽는다 — 참가가 역할에서 나온다.
+        timeline = client.get(
+            "/v1/workspaces/alpha/timeline", params={"caller": "helper"}
+        )
+        assert timeline.status_code == 200
+        bodies = [message["body"] for message in timeline.json()]
+        assert any("fungis init" in body for body in bodies), "에이전트 안내가 없다"
+        assert sum("fungis init" in body for body in bodies) == 1, "사람에게도 갔다"
+
+
 def test_a_room_name_in_the_reference_slot_also_reaches_its_lead(tmp_path):
     """참조 자리에 온 방 이름도 그 방 lead 한 명으로 푼다.
 

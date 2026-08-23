@@ -356,13 +356,19 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         current = db.role(role_id)
         prompt = current["onboarding_prompt"]
         is_new_assignment = current.get("agent_id") != payload.agent_id
+        # 온보딩은 `fungis init` 을 치라는 안내다. 사람에게는 칠 터미널이 없다.
+        onboards = (
+            payload.send_onboarding
+            and is_new_assignment
+            and db.principal_kind(payload.agent_id) == "agent"
+        )
         role, events = db.assign_role(
             role_id=role_id,
             agent_id=payload.agent_id,
             assigned_by=payload.assigned_by,
-            onboarding_sent=payload.send_onboarding and is_new_assignment,
+            onboarding_sent=onboards,
         )
-        if payload.send_onboarding and is_new_assignment:
+        if onboards:
             # 역할 설명이 비어 있어도 보낸다. 안 보내면 에이전트는 자기가
             # 배정된 줄도 모르고, PM은 앱에서 보냈다고 믿는다.
             #

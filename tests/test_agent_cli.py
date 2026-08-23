@@ -568,6 +568,33 @@ def test_to_narrows_the_default_recipient_instead_of_adding_to_it():
     assert default_recipients(client, "send") == []
 
 
+def test_a_reply_goes_to_the_person_holding_a_role_in_this_room():
+    """방마다 맡은 사람이 다를 수 있다. PM 하나로 고정하면 남의 방 답이
+    엉뚱한 사람에게 간다.
+
+    옛 서버는 역할에 kind 를 안 실어 준다. 그때는 PM 으로 떨어진다 — 모르는
+    채로 사람에게 보내는 것보다 낫다.
+    """
+    helped = FakeClient(roles=[
+        {"id": "r1", "name": "helper", "agent_id": "person-2", "agent_kind": "human"},
+        {"id": "r2", "name": "bot", "agent_id": "agent-1", "agent_kind": "agent"},
+    ])
+    assert default_recipients(helped, "reply") == ["person-2"]
+    assert default_recipients(helped, "request") == ["person-2"]
+    # send 는 주소 없이 자리에 붙이는 것이라 그대로 아무도 안 받는다.
+    assert default_recipients(helped, "send") == []
+
+    only_agents = FakeClient(roles=[
+        {"id": "r1", "name": "bot", "agent_id": "agent-1", "agent_kind": "agent"},
+    ])
+    assert default_recipients(only_agents, "reply") == ["pm"]
+
+    old_server = FakeClient(roles=[
+        {"id": "r1", "name": "helper", "agent_id": "person-2"},
+    ])
+    assert default_recipients(old_server, "reply") == ["pm"]
+
+
 def test_hq_with_no_recipient_means_every_convened_lead():
     client = FakeClient(workspace_id="hq-1", hq={"id": "hq-1", "name": "HQ"})
     for command in ("send", "reply", "request"):

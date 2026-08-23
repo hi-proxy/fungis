@@ -161,8 +161,7 @@ default is gone: name every recipient you want.
 
 Default recipient when you name none
   send in a normal room     nobody; it stays in the timeline only
-  reply in a normal room    PM
-  request in a normal room  PM
+  reply or request          the person holding a role in this room, else PM
   anything in HQ            every lead convened there
 """
 
@@ -299,12 +298,15 @@ Successful output echoes the exact body stored by the server.
     )
     add_addressing(send, project=True, reply=True)
     request = commands.add_parser(
-        "request", help="request attention or approval; defaults to PM",
+        "request", help="request attention or approval; defaults to this room's person",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Levels:
+        epilog="""Levels order the recipient's attention list. They do not gate
+anything: whoever receives the request can answer it, and the request clears
+when they reply.
+
   r1  informational request
   r2  review or intervention requested (default)
-  r3  explicit PM confirmation or approval required
+  r3  do not proceed until it is answered
 
 Examples:
   fungis request --level r2 --to reviewer \"review this change\"
@@ -361,7 +363,7 @@ def add_addressing(
     if level:
         command.add_argument(
             "--level", choices=("r1", "r2", "r3"), default="r2",
-            help="attention level: r1 info, r2 review, r3 PM approval",
+            help="attention level: r1 info, r2 review, r3 blocks your next step",
         )
     command.add_argument(
         "-t", "--to", action="append", default=[],
@@ -932,13 +934,32 @@ def default_recipients(client, command: str) -> list[str]:
 
     일반 방의 send는 주소 없이 자리에 붙이는 것이라 아무도 받지 않는다.
     reply와 request는 답과 요청이라 받을 사람이 없으면 하지 않은 것과 같다.
+
+    그 방에 사람이 역할로 앉아 있으면 답은 그에게 간다. 방마다 맡은 사람이
+    다를 수 있어서, PM 하나로 고정하면 남의 방 답이 엉뚱한 사람에게 간다.
     """
     hq = client.hq()
     if hq is not None and str(hq["id"]) == client.workspace_id:
         return []
     if command == "send":
         return []
-    return [str(client.pm_id)]
+    people = room_people(client)
+    return people or [str(client.pm_id)]
+
+
+def room_people(client) -> list[str]:
+    """이 방에서 역할을 맡고 있는 사람들. 에이전트는 세지 않는다.
+
+    옛 서버는 역할에 kind 를 안 실어 준다. 그때는 빈 목록이 되어 PM 으로
+    떨어진다 — 모르는 채로 사람에게 보내는 것보다 낫다.
+    """
+    found = []
+    for role in client.roles():
+        if role.get("agent_kind") == "human" and role.get("agent_id"):
+            agent_id = str(role["agent_id"])
+            if agent_id not in found:
+                found.append(agent_id)
+    return found
 
 
 def read_state(client, binding: dict, given: str | None) -> str:

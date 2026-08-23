@@ -1517,7 +1517,7 @@ class FungisDB:
                        CASE WHEN r.avatar IS NULL THEN 0 ELSE 1 END AS has_avatar,
                        r.avatar_updated_at,
                        a.id AS assignment_id, a.agent_id, a.assigned_at,
-                       a.onboarding_sent, p.display_name AS agent_name
+                       a.onboarding_sent, p.display_name AS agent_name, p.kind AS agent_kind
                 FROM workspace_roles r
                 LEFT JOIN role_assignments a ON a.role_id = r.id AND a.ended_at IS NULL
                 LEFT JOIN principals p ON p.id = a.agent_id
@@ -1634,11 +1634,13 @@ class FungisDB:
             ).fetchone()
             if role is None:
                 raise LookupError("role not found")
-            agent = conn.execute(
-                "SELECT 1 FROM principals WHERE id = ? AND kind = 'agent'", (agent_id,)
+            # 사람도 역할을 맡는다. 역할이 참가의 전제라, 여기서 사람을 막으면
+            # 사람을 방 하나에만 넣을 수단이 없다.
+            assignee = conn.execute(
+                "SELECT 1 FROM principals WHERE id = ?", (agent_id,)
             ).fetchone()
-            if agent is None:
-                raise LookupError("agent not found")
+            if assignee is None:
+                raise LookupError("assignee not found")
             current = conn.execute(
                 "SELECT * FROM role_assignments WHERE role_id = ? AND ended_at IS NULL",
                 (role_id,),
@@ -1824,7 +1826,7 @@ class FungisDB:
                       CASE WHEN r.avatar IS NULL THEN 0 ELSE 1 END AS has_avatar,
                       r.avatar_updated_at,
                       a.id AS assignment_id, a.agent_id, a.assigned_at,
-                      a.onboarding_sent, p.display_name AS agent_name
+                      a.onboarding_sent, p.display_name AS agent_name, p.kind AS agent_kind
                FROM workspace_roles r
                LEFT JOIN role_assignments a ON a.role_id = r.id AND a.ended_at IS NULL
                LEFT JOIN principals p ON p.id = a.agent_id
