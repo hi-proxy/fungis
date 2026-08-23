@@ -252,6 +252,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @app.post("/v1/messages", status_code=201)
     async def send_message(payload: MessageCreate) -> dict:
+        # 방이 없으면 먼저 만든다. 참가는 (방 × 사람) 을 세는 것이라, 방이
+        # 없으면 셀 자리가 없어 아무도 못 들어간다 — 사람도 마찬가지다.
+        db.ensure_workspace(payload.workspace_id)
         # 남의 방에 글을 남길 수는 없다. 읽기 경계와 같은 판정을 쓴다 — HQ는
         # 소속이 아니라 lead 여부로 열리고, 그 규칙이 이미 여기 들어 있다.
         guard_participant(payload.workspace_id, payload.sender_id)

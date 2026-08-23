@@ -849,14 +849,14 @@ def test_archiving_a_project_keeps_messages_and_ends_assignments(tmp_path):
         assert client.delete(f"/v1/projects/{project['id']}").status_code == 404
 
 
-def test_membership_answers_exactly_what_the_old_rule_answered(tmp_path):
-    """참가 표가 지금 판정과 모든 방에서 같은 답을 내는가.
+def test_every_way_into_a_room_still_opens_it(tmp_path):
+    """방에 들어오는 세 갈래가 모두 열람으로 이어지는가.
 
-    FUNG-3 의 닫힘 판정이다. 아직 아무도 이 표를 안 읽으므로(FUNG-4 가
-    갈아끼운다), 지금 할 수 있는 검증은 **두 답이 어긋나지 않는 것** 하나다.
+    FUNG-4 로 판정이 참가 표 한 줄이 됐다. 그 전에는 이 함수가 두 판정을
+    대조했는데, 이제 판정이 하나뿐이라 대조할 짝이 없다. **대신 갈래마다
+    실제로 열리는지를 잰다** — 하나만 빠져도 그 사람이 읽던 방을 못 읽는다.
 
-    갈래 셋을 한 판에 다 세운다 — 역할 보유자·소집된 방의 lead(HQ)·사람.
-    셋 중 하나만 빠져도 그 사람이 읽던 방을 못 읽게 된다.
+    갈래 셋: 역할 보유자 · 소집된 방의 lead(HQ) · 사람.
     """
     from fungis_server.db import FungisDB
 
@@ -890,34 +890,33 @@ def test_membership_answers_exactly_what_the_old_rule_answered(tmp_path):
     # 부팅 백필이 도는 자리라 새 Database 로 연다.
     database = FungisDB(path)
     try:
-        rooms = ["hq", "alpha", "beta", "local", "gone"]
-        people = ["pm", "lead-a", "worker-b", "outside"]
-        for room in rooms:
-            for person in people:
-                assert database.is_member(
-                    workspace_id=room, principal_id=person
-                ) == database.workspace_participant(
-                    workspace_id=room, principal_id=person
-                ), f"{person} 이 {room} 에서 어긋난다"
+        def reads(room, person):
+            return database.workspace_participant(
+                workspace_id=room, principal_id=person
+            )
 
-        # 어긋나지 않는다는 것만으로는 둘 다 비었을 수 있다. 갈래마다
-        # 적어도 하나씩은 실제로 잡혔는지 본다.
-        assert database.is_member(workspace_id="alpha", principal_id="lead-a")
-        assert database.is_member(workspace_id="hq", principal_id="lead-a")
-        assert database.is_member(workspace_id="beta", principal_id="worker-b")
-        assert database.is_member(workspace_id="beta", principal_id="pm")
-        # 소집 안 된 방의 역할 보유자는 HQ 에 못 들어온다.
-        assert not database.is_member(workspace_id="hq", principal_id="worker-b")
-        assert not database.is_member(workspace_id="alpha", principal_id="outside")
+        # 갈래 셋이 각각 열린다.
+        assert reads("alpha", "lead-a"), "역할 보유자가 그 방을 못 읽는다"
+        assert reads("hq", "lead-a"), "소집된 방의 lead 가 HQ 를 못 읽는다"
+        assert reads("beta", "worker-b"), "역할 보유자가 그 방을 못 읽는다"
+        assert reads("beta", "pm"), "사람이 방을 못 읽는다"
+        # 보관된 방도 사람에게는 열린다. 지난 대화를 되짚는 자리다.
+        assert reads("gone", "pm")
+
+        # 안 열려야 하는 것들. 여기가 무너지면 남의 방이 열린다.
+        assert not reads("hq", "worker-b"), "소집 안 된 방의 역할이 HQ 를 열었다"
+        assert not reads("alpha", "outside")
+        assert not reads("beta", "lead-a"), "남의 방이 열렸다"
+        assert not reads("alpha", "nobody-at-all")
     finally:
         database.close()
 
 
 def test_membership_backfill_forgets_what_ended(tmp_path):
-    """역할이 끝나면 그 참가도 사라진다. 부팅마다 다시 세기 때문이다.
+    """역할이 끝나면 그 방을 더는 못 읽는다.
 
-    지금 판정이 `ended_at IS NULL` 을 보므로 그것과 같아야 한다. 남길지
-    말지는 FUNG-4 에서 정할 일이고, 여기서는 지금 규칙을 그대로 옮긴다.
+    **역할이 참가의 전제다**(PM, 2026-08-23). 부팅마다 다시 세므로 그 규칙이
+    저절로 지켜진다 — 역할을 거둔 자리에 참가만 남지 않는다.
     """
     from fungis_server.db import FungisDB
 
@@ -940,7 +939,9 @@ def test_membership_backfill_forgets_what_ended(tmp_path):
 
     first = FungisDB(path)
     try:
-        assert first.is_member(workspace_id="alpha", principal_id="hand")
+        assert first.workspace_participant(
+            workspace_id="alpha", principal_id="hand"
+        )
     finally:
         first.close()
 
@@ -949,7 +950,6 @@ def test_membership_backfill_forgets_what_ended(tmp_path):
 
     second = FungisDB(path)
     try:
-        assert not second.is_member(workspace_id="alpha", principal_id="hand")
         assert not second.workspace_participant(
             workspace_id="alpha", principal_id="hand"
         )

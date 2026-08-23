@@ -188,25 +188,42 @@ CREATE TABLE IF NOT EXISTS role_assignments (
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_assignment_per_role
 ON role_assignments(role_id) WHERE ended_at IS NULL;
 
--- 누가 이 방에 있나. 역할과 따로 서는 개념이다.
+-- 누가 이 방에 있나. **역할이 참가의 전제다**(PM, 2026-08-23).
 --
--- 지금까지는 "역할을 갖고 있으면 방에 있는 것" 으로 봤다. 그래서 역할이
--- 없는 자리마다 특례가 붙었다 — 사람은 통째로 통과, HQ 는 소집된 방의
--- lead 를 따로 뒤짐. 두 번 특례면 개념이 빠진 것이고, 빠진 것이 참가다.
+-- 지금까지는 열람을 판정하는 자리에서 세 갈래를 손으로 갈랐다 — 사람이면
+-- 통과, HQ 면 소집된 방의 lead 를 따로 뒤짐, 아니면 역할 보유. 두 번 특례면
+-- 개념이 빠진 것이고, 빠진 것이 참가였다. 그 셋이 여기 한 곳에 모였다.
 --
--- source 는 어떻게 들어왔는지다. 회수 규칙이 갈래마다 다르므로(역할이
--- 끝나면 나가나, 소집 해제면 나가나) 판단 근거를 남겨 둔다. 그 규칙 자체는
--- 아직 안 정했다 — FUNG-4 에서 읽기를 갈아끼울 때 정한다.
-CREATE TABLE IF NOT EXISTS memberships (
-    workspace_id TEXT NOT NULL REFERENCES projects(id),
-    principal_id TEXT NOT NULL REFERENCES principals(id),
-    source TEXT NOT NULL CHECK (source IN ('role', 'hq_lead', 'owner')),
-    joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (workspace_id, principal_id, source)
-);
-
-CREATE INDEX IF NOT EXISTS membership_by_principal
-ON memberships(principal_id);
+-- **표가 아니라 뷰다.** 처음에는 표로 두고 부팅마다 다시 채웠는데, 그러면
+-- 서버가 도는 중에 배정된 역할이 재시작 전까지 없는 것이 된다. 역할이 전제인
+-- 이상 참가는 파생이고, 파생을 표에 들고 있으면 갱신 지점을 빠뜨릴 자리만
+-- 생긴다. 뷰는 늘 지금을 답한다.
+--
+-- 되돌릴 때: 역할 없이 방에만 있는 사람이 필요해지면 그때 표로 바꾼다.
+-- 그것은 "역할이 전제" 라는 결정을 다시 여는 일이므로 함께 정해야 한다.
+CREATE VIEW IF NOT EXISTS memberships AS
+    -- 역할을 맡고 있으면 그 방에 있다.
+    SELECT a.workspace_id AS workspace_id,
+           a.agent_id AS principal_id,
+           'role' AS source
+      FROM role_assignments a
+      JOIN projects p ON p.id = a.workspace_id
+     WHERE a.ended_at IS NULL
+    UNION
+    -- HQ 에는 역할이 없다. 구성원은 소집된 방의 lead 다.
+    SELECT hq.id, a.agent_id, 'hq_lead'
+      FROM workspace_roles r
+      JOIN role_assignments a ON a.role_id = r.id AND a.ended_at IS NULL
+      JOIN projects p ON p.id = r.workspace_id
+      JOIN projects hq ON hq.kind = 'hq'
+     WHERE r.is_lead = 1 AND r.deleted_at IS NULL
+       AND p.parent_id IS NOT NULL AND p.archived_at IS NULL
+    UNION
+    -- 사람은 모든 방을 본다. 보관된 방도 본다 — 지난 대화를 되짚는 자리다.
+    -- 이것을 좁히는 것은 스페이스 층의 일이지 이 뷰의 일이 아니다.
+    SELECT p.id, pr.id, 'owner'
+      FROM projects p, principals pr
+     WHERE pr.kind = 'human';
 
 CREATE TABLE IF NOT EXISTS message_role_recipients (
     role_id TEXT NOT NULL REFERENCES workspace_roles(id),
@@ -307,8 +324,21 @@ class FungisDB:
         )
         self._connection.row_factory = sqlite3.Row
         with self._lock:
+            self._drop_membership_table()
             self._connection.executescript(SCHEMA)
             self._migrate()
+
+    def _drop_membership_table(self) -> None:
+        """참가가 표였던 시절의 흔적을 치운다. 뷰를 만들기 전에 돌아야 한다.
+
+        `DROP TABLE IF EXISTS` 로는 못 지운다 — 이미 뷰로 바뀐 DB 에서 그것을
+        돌리면 "use DROP VIEW" 로 죽는다. 타입을 보고 표일 때만 지운다.
+        """
+        row = self._connection.execute(
+            "SELECT type FROM sqlite_master WHERE name = 'memberships'"
+        ).fetchone()
+        if row is not None and row[0] == "table":
+            self._connection.execute("DROP TABLE memberships")
 
     def _migrate(self) -> None:
         permission_columns = {
@@ -487,84 +517,26 @@ class FungisDB:
                     "INSERT OR IGNORE INTO projects(id, name) VALUES (?, ?)",
                     (workspace_id, workspace_id if workspace_id != "local" else "Local"),
                 )
-        # 방을 다 만든 뒤라야 참가가 걸릴 자리가 있다.
-        self._backfill_memberships()
 
-    # 참가를 지금 판정에서 그대로 유도하는 세 갈래. 여기 적힌 것이 곧
-    # workspace_participant 가 하는 일이라, 셋을 합치면 같은 답이 나와야 한다.
-    MEMBERSHIP_SOURCES = {
-        # 역할을 맡고 있으면 그 방에 있다.
-        "role": """SELECT DISTINCT a.workspace_id, a.agent_id
-                     FROM role_assignments a
-                     JOIN projects p ON p.id = a.workspace_id
-                    WHERE a.ended_at IS NULL""",
-        # HQ 에는 역할이 없다. 구성원은 소집된 방의 lead 다.
-        "hq_lead": """SELECT DISTINCT hq.id, a.agent_id
-                        FROM workspace_roles r
-                        JOIN role_assignments a
-                          ON a.role_id = r.id AND a.ended_at IS NULL
-                        JOIN projects p ON p.id = r.workspace_id
-                        JOIN projects hq ON hq.kind = 'hq'
-                       WHERE r.is_lead = 1 AND r.deleted_at IS NULL
-                         AND p.parent_id IS NOT NULL AND p.archived_at IS NULL""",
-        # 사람은 모든 방을 본다. 지금 규칙 그대로다 — 이것을 좁히는 것이
-        # 이 에픽의 목적이지만, 백필이 할 일은 옮기는 것이지 고치는 것이 아니다.
-        #
-        # **보관된 방도 넣는다.** 지금 판정은 사람이면 보관 여부를 안 본다.
-        # 여기서 걸렀더니 실제 데이터에서 네 쌍이 어긋났다 — 조건을 하나 더
-        # 얹는 것이 곧 규칙을 바꾸는 것이다.
-        "owner": """SELECT p.id, pr.id
-                      FROM projects p, principals pr
-                     WHERE pr.kind = 'human'""",
-    }
+    def ensure_workspace(self, workspace_id: str) -> None:
+        """메시지가 방보다 먼저 도착할 수 있다. 그 방을 여기서 만든다.
 
-    def _backfill_memberships(self) -> None:
-        """참가를 지금 판정에서 유도해 채운다. 부팅마다 다시 센다.
+        전에는 부팅 때 `messages` 를 훑어 만들었다. 참가가 뷰가 되면서 그
+        시점이 너무 늦어졌다 — `projects` 에 없는 방은 뷰가 열거할 수 없고,
+        열거되지 않으면 **사람조차 그 방에 못 들어간다.** 없는 것을 셀 수는
+        없기 때문이다.
 
-        아직 아무도 이 표를 안 읽는다 — 읽기를 갈아끼우는 것은 FUNG-4 다.
-        그때까지는 순수한 파생값이라, 쓰기 지점을 여기저기 심는 것보다 다시
-        세는 편이 안전하다. **빠뜨린 쓰기 지점 하나가 곧 못 읽는 방 하나다.**
-
-        joined_at 을 지키려고 통째로 지우지 않는다. 늘어난 것만 넣고 없어진
-        것만 뺀다.
-        """
-        for source, query in self.MEMBERSHIP_SOURCES.items():
-            wanted = {
-                (str(row[0]), str(row[1]))
-                for row in self._connection.execute(query)
-            }
-            held = {
-                (str(row["workspace_id"]), str(row["principal_id"]))
-                for row in self._connection.execute(
-                    "SELECT workspace_id, principal_id FROM memberships WHERE source = ?",
-                    (source,),
-                )
-            }
-            for workspace_id, principal_id in wanted - held:
-                self._connection.execute(
-                    """INSERT OR IGNORE INTO memberships(
-                           workspace_id, principal_id, source
-                       ) VALUES (?, ?, ?)""",
-                    (workspace_id, principal_id, source),
-                )
-            for workspace_id, principal_id in held - wanted:
-                self._connection.execute(
-                    """DELETE FROM memberships
-                        WHERE workspace_id = ? AND principal_id = ? AND source = ?""",
-                    (workspace_id, principal_id, source),
-                )
-
-    def is_member(self, *, workspace_id: str, principal_id: str) -> bool:
-        """참가 표로만 판정한다. 아직 아무도 안 쓴다 — FUNG-4 가 쓴다.
-
-        지금은 `workspace_participant` 와 같은 답을 내는지 재는 데만 쓴다.
+        방을 만드는 것 자체는 새 행동이 아니다. 부팅이 하던 일을 메시지가
+        도착하는 자리로 당긴 것뿐이다.
         """
         with self._lock:
-            return self._connection.execute(
-                """SELECT 1 FROM memberships
-                    WHERE workspace_id = ? AND principal_id = ? LIMIT 1""",
-                (workspace_id, principal_id),
-            ).fetchone() is not None
+            self._connection.execute(
+                "INSERT OR IGNORE INTO projects(id, name) VALUES (?, ?)",
+                (
+                    workspace_id,
+                    workspace_id if workspace_id != "local" else "Local",
+                ),
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -738,53 +710,28 @@ class FungisDB:
             ]
 
     def workspace_participant(self, *, workspace_id: str, principal_id: str) -> bool:
-        """이 사람이 그 방의 대화를 읽어도 되나.
+        """이 사람이 그 방의 대화를 읽어도 되나. **참가 표 한 줄이 답한다.**
 
         지키려는 것은 대화지 명단이 아니다. 명단은 init으로 볼 수 있다 —
         들어가려면 이미 안에 있어야 하는 꼴이 되면 아무도 못 들어온다.
 
-        참가 = 역할 보유로 본다. 지금 모델에서 방에 있다는 것을 말하는 다른
-        수단이 없다. 사람은 통과시킨다. PM은 어느 방에도 역할로 적혀 있지
-        않지만 모든 방을 본다.
+        전에는 여기서 세 갈래를 손으로 갈랐다. 사람이면 무조건 통과,
+        HQ 면 소집된 방의 lead 를 따로 뒤짐, 아니면 역할 보유. 그 셋이
+        `memberships` 의 `owner`·`hq_lead`·`role` 이 됐고, 갈래를 나누는 일은
+        표를 채울 때 한 번만 한다.
 
-        HQ만 규칙이 다르다. 거기 구성원은 역할이 아니라 소집된 방의 lead다.
+        수명은 역할이 정한다 — **역할이 참가의 전제다**(PM, 2026-08-23).
+        역할이 끝나거나 소집이 풀리면 그 참가도 사라진다. 부팅마다 다시
+        세므로 그 규칙이 저절로 지켜진다.
 
         여기서 막는 것은 실수다. 신원은 자기 신고라 작정하면 우회된다.
         그건 서버가 이 기계를 벗어날 때 인증으로 풀 일이고, 그때 이 검사는
         뜯지 않고 그 위에 얹힌다.
         """
         with self._lock:
-            row = self._connection.execute(
-                "SELECT kind FROM principals WHERE id = ?", (principal_id,)
-            ).fetchone()
-            if row is None:
-                return False
-            if row["kind"] == "human":
-                return True
-            # HQ에는 역할이 없다. 소집은 방을 붙이는 것이지 HQ에 역할을 만드는
-            # 것이 아니라, 역할 보유로만 보면 모든 에이전트가 막힌다. HQ의
-            # 구성원은 소집된 방의 lead다.
-            hq = self._connection.execute(
-                "SELECT 1 FROM projects WHERE id = ? AND kind = 'hq'", (workspace_id,)
-            ).fetchone()
-            if hq is not None and self._connection.execute(
-                    """SELECT 1 FROM workspace_roles r
-                       JOIN role_assignments a
-                         ON a.role_id = r.id AND a.ended_at IS NULL
-                       JOIN projects p ON p.id = r.workspace_id
-                       WHERE r.is_lead = 1 AND r.deleted_at IS NULL
-                         AND p.parent_id IS NOT NULL AND p.archived_at IS NULL
-                         AND a.agent_id = ?
-                       LIMIT 1""",
-                (principal_id,),
-            ).fetchone() is not None:
-                return True
-            # HQ에 직접 역할을 가진 경우는 그대로 통과한다. lead 규칙은 그 위에
-            # 더하는 것이지 대신하는 것이 아니다.
             return self._connection.execute(
-                """SELECT 1 FROM role_assignments
-                   WHERE workspace_id = ? AND agent_id = ? AND ended_at IS NULL
-                   LIMIT 1""",
+                """SELECT 1 FROM memberships
+                    WHERE workspace_id = ? AND principal_id = ? LIMIT 1""",
                 (workspace_id, principal_id),
             ).fetchone() is not None
 
