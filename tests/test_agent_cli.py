@@ -576,9 +576,61 @@ def test_hq_with_no_recipient_means_every_convened_lead():
 
 def test_an_unknown_to_value_goes_out_as_an_address_for_the_server_to_resolve():
     """HQ 에는 역할이 없다. 방 이름을 그대로 넘겨 서버가 그 방 lead 로 푼다."""
-    client = FakeClient(workspace_id="hq-1", roles=[])
+    client = FakeClient(
+        workspace_id="hq-1", roles=[], hq={"id": "hq-1", "name": "HQ"},
+        board=[{"project_id": "p-1", "project_name": "archivia", "ticket_prefix": "ARCH"}],
+    )
     role_ids, direct, _, _ = addressing(client, Options(to=["ARCH"]))
     assert (role_ids, direct) == ([], ["ARCH"])
+
+
+def test_a_recipient_nobody_knows_is_stopped_here_with_what_to_type():
+    """서버까지 흘려보내면 FOREIGN KEY constraint failed 가 돌아온다.
+
+    그 원문으로는 무엇이 틀렸는지 알 수 없고, 뒤따르는 안내가 방 문맥을 다시
+    잡으라고 해서 멀쩡한 문맥을 의심하게 만든다. mei 와 archivia 가 각각
+    한 번씩 그 벽을 맞았다.
+
+    목록만 보여주는 것으로는 모자라다 — PM 은 애초에 목록에 없는 상대라,
+    목록만 주면 "PM 이 왜 없지" 로 다시 막힌다.
+    """
+    client = FakeClient(roles=[{"id": "role-1", "name": "fungis.Lead"}])
+    try:
+        addressing(client, Options(to=["dispatch.dev"]))
+    except ValueError as error:
+        message = str(error)
+    else:
+        raise AssertionError("없는 수신자가 그대로 나갔다")
+
+    assert "dispatch.dev" in message
+    assert "@fungis.Lead" in message, "칠 수 있는 것을 안 보여준다"
+    assert "PM" in message and "--to 없이" in message, "PM 부르는 법이 빠졌다"
+    assert "--to-id" in message, "절대 id 로 부르는 길이 빠졌다"
+
+
+def test_a_room_name_means_the_same_thing_in_to_and_cc():
+    """방 이름은 어디서 쓰든 그 방 lead 한 명이다.
+
+    전에는 --to 에서만 풀리고 --cc 는 외래키 오류로 떨어졌다. 옵션마다 규칙이
+    다르면 문서를 외우지 않는 한 예측할 수 없다 (archivia). 그리고 참조로
+    준 방 이름이 전원을 뜻할 여지가 없다는 것을 서버 쪽에서 확인했다 —
+    `_recipient_or_room_lead` 가 lead 하나로만 푼다 (mei 의 물음).
+    """
+    client = FakeClient(
+        workspace_id="hq-1", roles=[], hq={"id": "hq-1", "name": "HQ"},
+        board=[{"project_id": "p-1", "project_name": "archivia", "ticket_prefix": "ARCH"}],
+    )
+    role_ids, direct, cc, _ = addressing(client, Options(to=["ARCH"], cc=["archivia"]))
+    assert (role_ids, direct) == ([], ["ARCH"])
+    assert cc == ["archivia"], "--cc 가 방 이름을 여전히 막는다"
+
+    # 방도 역할도 아니면 그대로 막는다.
+    try:
+        addressing(client, Options(cc=["없는방"]))
+    except ValueError as error:
+        assert "없는방" in str(error)
+    else:
+        raise AssertionError("모르는 이름이 그대로 나갔다")
 
 
 def test_sending_to_nobody_says_so_instead_of_looking_like_success(capsys):
@@ -617,7 +669,10 @@ def test_a_role_can_be_typed_the_way_the_screen_shows_it():
 
 
 def test_absolute_ids_stay_absolute():
-    client = FakeClient(roles=[{"id": "role-1", "name": "reviewer"}])
+    client = FakeClient(roles=[
+        {"id": "role-1", "name": "reviewer"},
+        {"id": "role-2", "name": "front1"},
+    ])
     role_ids, direct, cc, cc_ids = addressing(
         client, Options(to=["reviewer"], to_id=["agent-x"], cc=["front1"],
                         cc_id=["agent-y"])

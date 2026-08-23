@@ -1937,9 +1937,15 @@ class FungisDB:
         ]
         unique_recipients = list(dict.fromkeys(unique_recipients))
         unique_roles = list(dict.fromkeys(role_ids or []))
+        # 참조 자리에도 방 이름이 올 수 있다. 수신자 자리와 같은 함수를 태운다 —
+        # **방 이름은 어디서 쓰든 그 방 lead 한 명이다.** 여기만 안 태우면 같은
+        # 이름이 --to 에서는 풀리고 --cc 에서는 외래키 오류가 된다.
         unique_references = [
             value
-            for value in dict.fromkeys(reference_ids or [])
+            for value in dict.fromkeys(
+                self._recipient_or_room_lead(value)
+                for value in (reference_ids or [])
+            )
             if value not in unique_recipients
         ]
         normalized_track = track.strip() if track and track.strip() else None

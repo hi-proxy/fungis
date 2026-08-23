@@ -175,10 +175,24 @@ class PMClient:
         known.add(str(self.pm_id))
         if identity in known:
             return identity
+        # 방 이름은 서버가 그 방 lead 로 푼다. 여기서 막으면 같은 이름이
+        # --to 에서는 풀리고 --cc 에서만 거절당한다.
+        if self._names_a_room(identity):
+            return identity
         raise PMServerError(
             f"reference not found: {identity}. "
             "use a role name, a session local name, or a principal id"
         )
+
+    def _names_a_room(self, identity: str) -> bool:
+        wanted = identity.casefold()
+        for project in self.projects():
+            if identity == project["id"]:
+                return True
+            for label in (project.get("name"), project.get("ticket_prefix")):
+                if label and str(label).casefold() == wanted:
+                    return True
+        return False
 
     def _role_id(self, identity: str) -> str:
         matches = [

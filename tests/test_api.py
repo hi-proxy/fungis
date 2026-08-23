@@ -1161,6 +1161,37 @@ def test_hq_addresses_a_room_by_name_and_reaches_its_lead(tmp_path):
         assert message.json()["recipient_ids"] == ["lead"]
 
 
+def test_a_room_name_in_the_reference_slot_also_reaches_its_lead(tmp_path):
+    """참조 자리에 온 방 이름도 그 방 lead 한 명으로 푼다.
+
+    수신자 자리에만 이 해석을 태웠던 탓에, 같은 이름이 --to 에서는 풀리고
+    --cc 에서는 외래키 오류로 떨어졌다. 옵션마다 규칙이 다르면 문서를 외우지
+    않는 한 예측할 수 없다.
+
+    **전원이 아니라 한 명이다.** 그래서 대칭으로 두어도 뜻이 흔들리지 않는다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("lead", "agent"), ("hand", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        hq, _ = convene(client, "archivia")
+        message = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": hq["id"], "sender_id": "pm",
+                "recipient_ids": ["pm"], "reference_ids": ["ARCH"],
+                "body": "표지 건은 참고만",
+            },
+        )
+        assert message.status_code == 201
+        assert message.json()["reference_ids"] == ["lead"]
+
+
 def test_one_message_can_be_pulled_out_by_its_room_number(tmp_path):
     app = create_app(tmp_path / "api.db")
     with TestClient(app) as client:

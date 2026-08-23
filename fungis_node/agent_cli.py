@@ -824,36 +824,104 @@ def reply_reference(ref: str | None) -> int | None:
     return int(ref)
 
 
+def hq_room_names(client) -> dict[str, str]:
+    """HQ 에서 수신자로 쓸 수 있는 방 이름들. 다른 방에서는 빈 값이다.
+
+    HQ 에는 역할이 없다 — 거기 구성원은 소집된 방의 lead 다. 그래서 지목도
+    역할이 아니라 방 이름으로 한다.
+    """
+    hq = client.hq()
+    if hq is None or str(client.workspace_id) != str(hq["id"]):
+        return {}
+    names: dict[str, str] = {}
+    for track in client.board():
+        prefix = track.get("ticket_prefix")
+        # 프리픽스도 방 이름도 받되 **보여줄 때는 프리픽스 하나로 모은다.**
+        # 둘 다 늘어놓으면 같은 방이 두 번 적힌 것처럼 보인다.
+        label = str(prefix or track.get("project_name") or "")
+        for key in (prefix, track.get("project_name")):
+            if key:
+                names[str(key).casefold()] = label
+    return names
+
+
+def unknown_recipient(value: str, roles: list[str], rooms: dict[str, str], flag: str) -> str:
+    """지목이 빗나갔을 때 무엇을 칠 수 있는지 그 자리에서 보여준다.
+
+    전에는 그대로 서버로 넘겨서 FOREIGN KEY constraint failed 가 돌아왔다.
+    제약 위반 원문은 무엇이 틀렸는지 말해 주지 않고, 뒤따르는 안내가 방
+    문맥을 다시 잡으라고 해서 멀쩡한 문맥을 의심하게 만들었다. mei 와
+    archivia 가 각각 한 번씩, 나중에 나까지 같은 벽을 맞았다.
+
+    **틀린 곳을 가리키는 안내는 없느니만 못하다.** 우회 시도만 부른다.
+
+    목록만 보여주는 것으로는 모자란다. PM 은 애초에 목록에 없는 상대라,
+    목록만 주면 "PM 이 왜 없지" 로 다시 막힌다 (mei 의 지적). 그래서 목록과
+    함께 PM 을 부르는 법을 같이 적는다.
+    """
+    lines = [f"알 수 없는 수신자다: {value}"]
+    if roles:
+        lines.append("이 방의 역할: " + ", ".join(f"@{name}" for name in roles))
+    if rooms:
+        lines.append(
+            "이 방(HQ)에서는 방 이름으로 지목한다: "
+            + ", ".join(sorted(set(rooms.values())))
+        )
+    if not roles and not rooms:
+        lines.append("이 방에는 지목할 역할이 없다.")
+    lines.append('PM 에게는 --to 없이 보낸다: fungis reply "..."')
+    lines.append(f"절대 id 로 부르려면 {flag}-id 를 쓴다.")
+    return "\n".join(lines)
+
+
 def addressing(client, args) -> tuple[list[str], list[str], list[str], list[str]]:
     """--to/--to-id/--cc/--cc-id를 서버가 아는 네 자리로 가른다.
 
-    --to는 먼저 이 방의 역할로 읽는다. 역할이 아니면 그대로 수신자 자리에
-    넣는다 — HQ에서 방 이름을 주면 서버가 그 방 lead로 푼다.
+    --to는 먼저 이 방의 역할로 읽는다. 역할이 아니면 HQ 의 방 이름으로 읽고,
+    그것도 아니면 **여기서 막는다.** 그대로 넘기면 서버가 외래키 오류를
+    뱉는데, 그 원문으로는 무엇이 틀렸는지 알 수 없다.
 
     state·board·init이 역할을 @이름으로 보여주므로 @를 붙여 치는 것을 받는다.
-    안 받으면 화면에서 읽은 것을 그대로 쳤을 때 수신자 자리로 새고, 서버가
-    그런 id는 없다며 외래키 오류를 뱉는다. 읽은 그대로 칠 수 있어야 한다.
+    안 받으면 화면에서 읽은 것을 그대로 쳤을 때 막힌다. 읽은 그대로 칠 수
+    있어야 한다.
     """
     known: dict[str, str] = {}
+    role_names: list[str] = []
     if args.to or args.cc:
         for role in client.roles():
             known[role["name"]] = role["name"]
             known[role["id"]] = role["id"]
+            role_names.append(str(role["name"]))
 
     def as_role(value: str) -> str | None:
         return known.get(value) or known.get(value.lstrip("@"))
 
+    rooms = hq_room_names(client) if (args.to or args.cc) else {}
+
     role_ids, direct = [], []
     for value in args.to:
         name = as_role(value)
-        (role_ids if name else direct).append(name or value)
+        if name is not None:
+            role_ids.append(name)
+        elif value.casefold() in rooms:
+            # 서버가 그 방의 lead 로 푼다.
+            direct.append(value)
+        else:
+            raise ValueError(unknown_recipient(value, role_names, rooms, "--to"))
     direct.extend(args.to_id)
-    return (
-        role_ids,
-        direct,
-        [as_role(value) or value for value in args.cc],
-        list(args.cc_id),
-    )
+
+    references = []
+    for value in args.cc:
+        name = as_role(value)
+        if name is not None:
+            references.append(name)
+        elif value.casefold() in rooms:
+            # --to 와 같은 뜻이다. 서버가 그 방 lead 한 명으로 푼다.
+            references.append(value)
+        else:
+            raise ValueError(unknown_recipient(value, role_names, rooms, "--cc"))
+
+    return role_ids, direct, references, list(args.cc_id)
 
 
 def default_recipients(client, command: str) -> list[str]:
