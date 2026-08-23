@@ -915,7 +915,7 @@ def test_every_way_into_a_room_still_opens_it(tmp_path):
 def test_membership_backfill_forgets_what_ended(tmp_path):
     """역할이 끝나면 그 방을 더는 못 읽는다.
 
-    **역할이 참가의 전제다**(PM, 2026-08-23). 부팅마다 다시 세므로 그 규칙이
+    **역할이 참가의 전제다.** 부팅마다 다시 세므로 그 규칙이
     저절로 지켜진다 — 역할을 거둔 자리에 참가만 남지 않는다.
     """
     from fungis_server.db import FungisDB

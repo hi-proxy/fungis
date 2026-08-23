@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS role_assignments (
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_assignment_per_role
 ON role_assignments(role_id) WHERE ended_at IS NULL;
 
--- 누가 이 방에 있나. **역할이 참가의 전제다**(PM, 2026-08-23).
+-- 누가 이 방에 있나. **역할이 참가의 전제다.**
 --
 -- 지금까지는 열람을 판정하는 자리에서 세 갈래를 손으로 갈랐다 — 사람이면
 -- 통과, HQ 면 소집된 방의 lead 를 따로 뒤짐, 아니면 역할 보유. 두 번 특례면
@@ -720,7 +720,7 @@ class FungisDB:
         `memberships` 의 `owner`·`hq_lead`·`role` 이 됐고, 갈래를 나누는 일은
         표를 채울 때 한 번만 한다.
 
-        수명은 역할이 정한다 — **역할이 참가의 전제다**(PM, 2026-08-23).
+        수명은 역할이 정한다 — **역할이 참가의 전제다.**
         역할이 끝나거나 소집이 풀리면 그 참가도 사라진다. 부팅마다 다시
         세므로 그 규칙이 저절로 지켜진다.
 

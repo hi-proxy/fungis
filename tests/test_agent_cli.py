@@ -588,8 +588,7 @@ def test_a_recipient_nobody_knows_is_stopped_here_with_what_to_type():
     """서버까지 흘려보내면 FOREIGN KEY constraint failed 가 돌아온다.
 
     그 원문으로는 무엇이 틀렸는지 알 수 없고, 뒤따르는 안내가 방 문맥을 다시
-    잡으라고 해서 멀쩡한 문맥을 의심하게 만든다. mei 와 archivia 가 각각
-    한 번씩 그 벽을 맞았다.
+    잡으라고 해서 멀쩡한 문맥을 의심하게 만든다. 실사용에서 그 벽을 맞았다.
 
     목록만 보여주는 것으로는 모자라다 — PM 은 애초에 목록에 없는 상대라,
     목록만 주면 "PM 이 왜 없지" 로 다시 막힌다.
@@ -612,9 +611,9 @@ def test_a_room_name_means_the_same_thing_in_to_and_cc():
     """방 이름은 어디서 쓰든 그 방 lead 한 명이다.
 
     전에는 --to 에서만 풀리고 --cc 는 외래키 오류로 떨어졌다. 옵션마다 규칙이
-    다르면 문서를 외우지 않는 한 예측할 수 없다 (archivia). 그리고 참조로
+    다르면 문서를 외우지 않는 한 예측할 수 없다. 그리고 참조로
     준 방 이름이 전원을 뜻할 여지가 없다는 것을 서버 쪽에서 확인했다 —
-    `_recipient_or_room_lead` 가 lead 하나로만 푼다 (mei 의 물음).
+    `_recipient_or_room_lead` 가 lead 하나로만 푼다.
     """
     client = FakeClient(
         workspace_id="hq-1", roles=[], hq={"id": "hq-1", "name": "HQ"},
