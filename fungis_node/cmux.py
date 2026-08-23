@@ -263,17 +263,22 @@ class CmuxAdapter:
             surface_ref, surface = self._find_surface(surfaces, surface_id)
             transcript_path = session.get("transcriptPath")
             process_tty = self._process_tty(session.get("pid"))
-            codex_tty_matches = []
-            if provider == "codex" and transcript_path and process_tty:
-                codex_tty_matches = [
+            tty_matches = (
+                [
                     (ref, value)
                     for ref, value in surfaces.items()
                     if str(value.get("tty") or "").removeprefix("/dev/")
                     == process_tty
                 ]
-                if len(codex_tty_matches) == 1:
-                    surface_ref, surface = codex_tty_matches[0]
-                    surface_id = str(surface.get("id") or surface_id)
+                if process_tty
+                else []
+            )
+            codex_tty_matches = (
+                tty_matches if provider == "codex" and transcript_path else []
+            )
+            if len(codex_tty_matches) == 1:
+                surface_ref, surface = codex_tty_matches[0]
+                surface_id = str(surface.get("id") or surface_id)
             if surface is None:
                 continue
             raw_lifecycle = (
@@ -327,17 +332,26 @@ class CmuxAdapter:
             elif surface_tty is None:
                 binding_verified = False
                 verification_reason = "surface_tty_missing"
-            elif process_tty != surface_tty and not tty_exists(surface_tty):
-                # cmux 가 복원한 표면은 재부팅 전 tty 이름을 그대로 들고 있다.
-                # 그 장치는 이제 없다. 없는 이름과 살아 있는 프로세스를 견주면
-                # 영원히 안 맞고, 그러면 깨우기가 통째로 멈춘다(8/19).
-                #
-                # 표면 id 는 멀쩡하다 — 그 id 로 read-screen 하면 지금 화면이
-                # 그대로 온다. 그리고 이 id 는 에이전트 자신의 훅이 적은 것이다.
-                # 죽은 이름표보다 그쪽이 정본이다.
+            elif process_tty != surface_tty and len(tty_matches) == 1:
+                # 그 세션이 실제로 앉아 있는 창을 찾았다. cmux 가 든 이름표가
+                # 낡았을 뿐이므로 찾은 쪽으로 옮긴다.
+                surface_ref, surface = tty_matches[0]
+                surface_id = str(surface.get("id") or surface_id)
+                surface_tty = process_tty
                 binding_verified = True
-                verification_reason = "surface_tty_gone_hook_surface_trusted"
+                verification_reason = "process_tty_surface"
+            elif process_tty != surface_tty and not tty_matches:
+                # cmux 가 복원한 표면은 재부팅 전 tty 이름을 그대로 들고 있다.
+                # 그 이름이 /dev 에 남아 있어도 그 창의 것이라는 보장은 없다 —
+                # 번호는 재사용되고, 실제로 다른 프로그램이 물고 있었다.
+                #
+                # 그래서 이름이 아니라 **그 tty 를 쓰는 창이 트리에 있는가**로
+                # 본다. 하나도 없으면 에이전트 자신의 훅이 적은 surface 가
+                # 정본이다. 그 id 로 read-screen 하면 지금 화면이 그대로 온다.
+                binding_verified = True
+                verification_reason = "surface_tty_stale_hook_surface_trusted"
             elif process_tty != surface_tty:
+                # 그 tty 를 쓰는 창이 여럿이다. 어느 것인지 못 고른다.
                 binding_verified = False
                 verification_reason = "agent_tty_surface_tty_mismatch"
             else:

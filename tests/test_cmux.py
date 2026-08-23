@@ -491,14 +491,19 @@ def test_a_surface_whose_tty_device_is_gone_is_still_the_agents_terminal(tmp_pat
 
     candidate = RestoredCmux(hook_store_dir=hook_store).discover_agents()[0]
     assert candidate.binding_verified is True
-    assert candidate.verification_reason == "surface_tty_gone_hook_surface_trusted"
+    assert candidate.verification_reason == "surface_tty_stale_hook_surface_trusted"
 
-    # 살아 있는 tty 가 안 맞는 것은 여전히 거부한다. 검사를 없앤 것이 아니다.
-    # 어느 기계에나 있는 장치를 써야 이 판정이 기계마다 달라지지 않는다.
+    # 그 tty 를 쓰는 창을 트리에서 찾으면 그리로 옮긴다. 이름표가 낡았을 뿐
+    # 어느 창인지는 분명해서, 거절하는 것보다 옮기는 것이 맞다.
     class MovedCmux(FakeCmux):
         def _run_json(self, *args):
             tree = super()._run_json(*args)
-            tree["windows"][0]["workspaces"][0]["panes"][0]["surfaces"][0]["tty"] = "null"
+            surfaces = tree["windows"][0]["workspaces"][0]["panes"][0]["surfaces"]
+            surfaces[0]["tty"] = "ttys99999"
+            surfaces.append({
+                "ref": "surface:moved", "id": "surface-moved",
+                "tty": "/dev/ttys008",
+            })
             return tree
 
         @staticmethod
@@ -506,8 +511,9 @@ def test_a_surface_whose_tty_device_is_gone_is_still_the_agents_terminal(tmp_pat
             return "ttys008"
 
     moved = MovedCmux(hook_store_dir=hook_store).discover_agents()[0]
-    assert moved.binding_verified is False
-    assert moved.verification_reason == "agent_tty_surface_tty_mismatch"
+    assert moved.binding_verified is True
+    assert moved.verification_reason == "process_tty_surface"
+    assert moved.surface_id == "surface-moved", "찾은 창으로 안 옮겼다"
 
 
 def test_tty_exists_says_no_for_a_missing_device(tmp_path):
