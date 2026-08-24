@@ -329,6 +329,24 @@ class CmuxAdapter:
                         "codex_process_tty_not_unique"
                         if codex_tty_matches else "codex_process_tty_not_found"
                     )
+            elif surface_tty is None and len(tty_matches) == 1:
+                # 그 tty 를 쓰는 창을 찾았으면 이름이 빈 것과 무관하게 그리로.
+                surface_ref, surface = tty_matches[0]
+                surface_id = str(surface.get("id") or surface_id)
+                surface_tty = process_tty
+                binding_verified = True
+                verification_reason = "process_tty_surface"
+            elif surface_tty is None and not tty_matches:
+                # cmux 는 살아 있는 surface 에도 tty 를 null 로 내놓을 때가 있다.
+                # 프로세스에는 실제 tty 가 있지만 트리 어디에도 그 이름이 없다.
+                #
+                # 그때만 훅이 직접 가리킨 surface 와 살아 있는 PID 를 한 쌍으로
+                # 본다. 같은 tty 를 든 창이 따로 있으면 위에서 그리로 가고,
+                # 여럿이면 아래에서 거절된다. 검사를 없애는 것이 아니라 cmux 가
+                # 비워 둔 칸을 다른 증거로 채우는 것이다.
+                surface_tty = process_tty
+                binding_verified = True
+                verification_reason = "surface_tty_missing_hook_surface_trusted"
             elif surface_tty is None:
                 binding_verified = False
                 verification_reason = "surface_tty_missing"
