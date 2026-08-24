@@ -223,7 +223,11 @@ CREATE VIEW IF NOT EXISTS memberships AS
     -- 이것을 좁히는 것은 스페이스 층의 일이지 이 뷰의 일이 아니다.
     SELECT p.id, pr.id, 'owner'
       FROM projects p, principals pr
-     WHERE pr.kind = 'human';
+     WHERE pr.kind = 'human'
+    UNION
+    -- 방을 가리지 않는 참가자. 사람이 아니어도 전부 본다.
+    SELECT p.id, g.principal_id, 'global'
+      FROM projects p, global_participants g;
 
 -- 질의에 딸린 보기. 묻는 쪽이 미리 적어 두면 답하는 쪽은 고르기만 한다.
 --
@@ -237,6 +241,16 @@ CREATE TABLE IF NOT EXISTS message_answers (
     position INTEGER NOT NULL,
     text TEXT NOT NULL,
     PRIMARY KEY (message_seq, position)
+);
+
+-- 방을 가리지 않고 보는 사람. 지금은 비서 하나를 위한 것이다.
+--
+-- 역할로 넣으면 방마다 하나씩 만들어야 하고, 방이 늘 때마다 손이 간다.
+-- 그리고 그 역할들이 무엇을 뜻하는지가 방마다 흩어진다. 여기 한 줄이면
+-- "이 사람은 전부 본다" 가 한 자리에 적힌다.
+CREATE TABLE IF NOT EXISTS global_participants (
+    principal_id TEXT PRIMARY KEY REFERENCES principals(id),
+    granted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- 폼의 답. **한 물음에 한 번만 채워진다** — 기본 키가 그것을 강제한다.
@@ -546,6 +560,38 @@ class FungisDB:
                     "INSERT OR IGNORE INTO projects(id, name) VALUES (?, ?)",
                     (workspace_id, workspace_id if workspace_id != "local" else "Local"),
                 )
+
+    def set_global_participant(self, principal_id: str, allowed: bool) -> bool:
+        """방을 가리지 않고 보는 사람을 넣거나 뺀다.
+
+        되돌릴 수 있어야 한다 — 잘못 준 접근을 코드 고쳐서 거두게 하면 안 된다.
+        """
+        with self.transaction() as conn:
+            if conn.execute(
+                "SELECT 1 FROM principals WHERE id = ?", (principal_id,)
+            ).fetchone() is None:
+                raise LookupError(f"no such principal: {principal_id}")
+            if allowed:
+                conn.execute(
+                    "INSERT OR IGNORE INTO global_participants(principal_id)"
+                    " VALUES (?)",
+                    (principal_id,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM global_participants WHERE principal_id = ?",
+                    (principal_id,),
+                )
+            return allowed
+
+    def global_participants(self) -> list[str]:
+        with self._lock:
+            return [
+                str(row["principal_id"])
+                for row in self._connection.execute(
+                    "SELECT principal_id FROM global_participants ORDER BY granted_at"
+                )
+            ]
 
     def ensure_workspace(self, workspace_id: str) -> None:
         """메시지가 방보다 먼저 도착할 수 있다. 그 방을 여기서 만든다.

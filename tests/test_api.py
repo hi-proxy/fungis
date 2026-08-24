@@ -1276,6 +1276,50 @@ def test_an_answer_fills_the_question_instead_of_becoming_a_message(tmp_path):
         assert written["given"]["position"] is None
 
 
+def test_a_global_participant_sees_every_room(tmp_path):
+    """방을 가리지 않고 보는 참가자. 비서의 최소 전제다.
+
+    방 하나만 보면 방 사이를 볼 수 없다. 역할로 넣으면 방마다 하나씩 만들어야
+    하고 방이 늘 때마다 손이 간다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (
+            ("pm", "human"), ("aide", "agent"), ("other", "agent")
+        ):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "alpha", "name": "alpha"})
+        client.post("/v1/projects", json={"id": "beta", "name": "beta"})
+        join(client, "alpha", "other")
+
+        rooms = ["alpha", "beta", "hq"]
+        assert not any(
+            client.get(f"/v1/workspaces/{room}/timeline", params={"caller": "aide"})
+            .status_code == 200
+            for room in rooms
+        ), "주기 전에 이미 보인다"
+
+        assert client.put("/v1/global-participants/aide").status_code == 200
+        for room in rooms:
+            assert client.get(
+                f"/v1/workspaces/{room}/timeline", params={"caller": "aide"}
+            ).status_code == 200, room
+        assert client.get("/v1/global-participants").json() == ["aide"]
+
+        # 거둘 수 있어야 한다. 잘못 준 접근을 코드로 되돌리게 하면 안 된다.
+        assert client.delete("/v1/global-participants/aide").status_code == 204
+        assert client.get(
+            "/v1/workspaces/beta/timeline", params={"caller": "aide"}
+        ).status_code == 403
+        # 역할로 들어온 방은 그대로 열려 있다.
+        assert client.get(
+            "/v1/workspaces/alpha/timeline", params={"caller": "other"}
+        ).status_code == 200
+
+
 def test_a_person_can_hold_a_role_and_is_not_told_to_run_init(tmp_path):
     """사람도 역할을 맡는다. 역할이 참가의 전제라 여기서 막으면 사람을 방
     하나에만 넣을 수 없다.

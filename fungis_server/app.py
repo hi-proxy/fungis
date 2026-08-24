@@ -685,6 +685,19 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def read_question(message_seq: int) -> dict:
         return db.question(message_seq)
 
+    @app.put("/v1/global-participants/{principal_id}")
+    def grant_global(principal_id: str) -> dict:
+        db.set_global_participant(principal_id, True)
+        return {"principal_id": principal_id, "global": True}
+
+    @app.delete("/v1/global-participants/{principal_id}", status_code=204)
+    def revoke_global(principal_id: str) -> None:
+        db.set_global_participant(principal_id, False)
+
+    @app.get("/v1/global-participants")
+    def list_global() -> list[str]:
+        return db.global_participants()
+
     @app.get("/v1/workspaces/{workspace_id}/questions")
     def read_questions(
         workspace_id: str, sender: str = Query(min_length=1)
