@@ -372,16 +372,24 @@ class FungisDB:
             self._migrate()
 
     def _drop_membership_table(self) -> None:
-        """참가가 표였던 시절의 흔적을 치운다. 뷰를 만들기 전에 돌아야 한다.
+        """참가 표/뷰를 치운다. 스키마를 적용하기 전에 돌아야 한다.
 
-        `DROP TABLE IF EXISTS` 로는 못 지운다 — 이미 뷰로 바뀐 DB 에서 그것을
-        돌리면 "use DROP VIEW" 로 죽는다. 타입을 보고 표일 때만 지운다.
+        표였던 시절의 흔적을 지우는 것이 하나고, **뷰 정의가 바뀌었을 때
+        갱신되게 하는 것**이 다른 하나다. `CREATE VIEW IF NOT EXISTS` 는
+        이름이 있으면 넘어가므로, 안 지우면 옛 정의가 그대로 남는다 — 갈래를
+        하나 더해도 아무 일이 안 일어난다.
+
+        `DROP TABLE IF EXISTS` 로는 못 지운다. 뷰에 그것을 돌리면 "use DROP
+        VIEW" 로 죽는다. 타입을 보고 맞는 쪽을 쓴다.
         """
         row = self._connection.execute(
             "SELECT type FROM sqlite_master WHERE name = 'memberships'"
         ).fetchone()
-        if row is not None and row[0] == "table":
-            self._connection.execute("DROP TABLE memberships")
+        if row is None:
+            return
+        self._connection.execute(
+            "DROP TABLE memberships" if row[0] == "table" else "DROP VIEW memberships"
+        )
 
     def _migrate(self) -> None:
         permission_columns = {
