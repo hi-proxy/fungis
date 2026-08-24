@@ -61,6 +61,9 @@ class MessageCreate(BaseModel):
     inherit_context: bool = True
     # 인박스에는 쌓이되 턴을 열지 않는다. 받는 쪽은 하던 걸음을 마치고 본다.
     later: bool = False
+    # 답하는 쪽이 고를 보기. 묻는 쪽이 미리 적는다. "기타"는 늘 붙으므로
+    # 여기 안 적는다.
+    answers: list[str] = Field(default_factory=list, max_length=12)
 
 
 class RoleCreate(BaseModel):
@@ -164,3 +167,10 @@ class BoardEdge(BaseModel):
     node_id: str = Field(min_length=1)
     waits_for: str = Field(min_length=1)
     created_by: str = Field(min_length=1)
+
+
+class AnswerGiven(BaseModel):
+    """물음에 채우는 답. 고른 보기든 직접 쓴 글이든 같은 자리로 온다."""
+
+    text: str = Field(min_length=1, max_length=2000)
+    answered_by: str = Field(min_length=1)

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .db import FungisDB
 from .schemas import (
+    AnswerGiven,
     AckRequest, BindingUpsert, MessageCreate, NodeUpsert, PrincipalCreate,
     BookmarkCreate,
     PMProfileUpdate, ProjectCreate, ProjectUpdate,
@@ -289,6 +290,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             tags=payload.tags,
             inherit_context=payload.inherit_context,
             later=payload.later,
+            answers=payload.answers,
         )
         for event in events:
             await hub.publish(event)
@@ -668,6 +670,26 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                 ),
             )
         return db.members(workspace_id)
+
+    @app.post("/v1/messages/{message_seq}/answer")
+    async def answer_question(message_seq: int, payload: AnswerGiven) -> dict:
+        question = db.answer_question(
+            message_seq=message_seq, text=payload.text,
+            answered_by=payload.answered_by,
+        )
+        for event in question.pop("events", []):
+            await hub.publish(event)
+        return question
+
+    @app.get("/v1/messages/{message_seq}/question")
+    def read_question(message_seq: int) -> dict:
+        return db.question(message_seq)
+
+    @app.get("/v1/workspaces/{workspace_id}/questions")
+    def read_questions(
+        workspace_id: str, sender: str = Query(min_length=1)
+    ) -> list[dict]:
+        return db.questions(workspace_id=workspace_id, sender_id=sender)
 
     @app.get("/v1/workspaces/{workspace_id}/attention")
     def workspace_attention(

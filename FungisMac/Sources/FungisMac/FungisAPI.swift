@@ -86,6 +86,17 @@ struct FungisAPI: Sendable {
         return try await request("api/projects/\(encoded(projectID))/file?\(query)")
     }
 
+    /// 물음에 답을 채운다. 메시지를 만들지 않는다 — 답은 물음 안에 산다.
+    func answerQuestion(
+        messageSeq: Int, projectID: String, text: String
+    ) async throws {
+        struct Payload: Encodable { let project_id: String; let text: String }
+        let _: EmptyResponse = try await request(
+            "api/questions/\(messageSeq)/answer", method: "POST",
+            body: Payload(project_id: projectID, text: text)
+        )
+    }
+
     // MARK: 상황보드
 
     func board() async throws -> BoardSnapshot {

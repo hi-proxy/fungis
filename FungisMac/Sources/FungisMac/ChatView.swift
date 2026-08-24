@@ -13,7 +13,6 @@ struct ChatView: View {
     @State private var showInspector = false
     @State private var inspectorTab: InspectorTab = .pins
     @State private var scrollProxy: ScrollViewProxy?
-    @State private var answering: AttentionRequest?
     @State private var showingBoard = false
     @State private var bookmarking: ChatMessage?
     /// 지금 답하는 대상. 에이전트는 `fungis reply 42` 로 참조를 걸어 왔는데
@@ -40,8 +39,17 @@ struct ChatView: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 10) {
                         ForEach(model.snapshot.attention) { request in
+                            // 카드를 누르면 그 말풍선으로 간다. 답은 거기서
+                            // 고른다 — 여기는 지나친 것을 찾아오는 자리다.
                             AttentionCard(request: request) {
-                                answering = request
+                                contextFilter = nil
+                                Task {
+                                    await model.ensureMessageLoaded(request.seq)
+                                    await Task.yield()
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        scrollProxy?.scrollTo(request.seq, anchor: .center)
+                                    }
+                                }
                             }
                         }
                     }.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 10)
@@ -81,7 +89,14 @@ struct ChatView: View {
                                             leadRooms: leadRooms,
                                             isBookmarked: bookmarkedSequences.contains(message.seq),
                                             reply: { replyingTo = message },
-                                            openCode: { viewingCode = $0 }
+                                            openCode: { viewingCode = $0 },
+                                            pick: { choice in
+                                                Task {
+                                                    await model.answerQuestion(
+                                                        seq: message.seq, text: choice
+                                                    )
+                                                }
+                                            }
                                         ) {
                                             contextFilter = contextFilter == $0 ? nil : $0
                                         } bookmark: {
@@ -206,9 +221,6 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showingBoard) {
             BoardSheet().environmentObject(model)
-        }
-        .sheet(item: $answering) { request in
-            AttentionAnswerSheet(request: request)
         }
         .sheet(item: $bookmarking) { message in
             BookmarkEditor(message: message)
@@ -916,41 +928,6 @@ private struct ChatComposer: View {
     }
 }
 
-private struct AttentionAnswerSheet: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-    let request: AttentionRequest
-    @State private var answer = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Answer \(request.senderName)").font(.title2.bold())
-            Text(MessagePrettyPrinter.prettyText(request.body, seed: request.seq))
-                .foregroundStyle(.secondary)
-            TextEditor(text: $answer)
-                .autocorrectionDisabled()
-                .frame(height: 130).padding(6)
-                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Send") {
-                    Task {
-                        if await model.send(
-                            answer, to: [request.senderID], inReplyTo: request.seq
-                        ) {
-                            dismiss()
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(24).frame(width: 480)
-    }
-}
-
 private struct BookmarkEditor: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -1235,6 +1212,8 @@ private struct MessageRow: View {
     let isBookmarked: Bool
     let reply: () -> Void
     let openCode: (CodeReference) -> Void
+    /// 보기를 골랐을 때. 그 값이 물음에 채워진다 — 새 말풍선이 생기지 않는다.
+    let pick: (String) -> Void
     let selectContext: (String) -> Void
     let bookmark: () -> Void
     @State private var showPretty = true
@@ -1313,6 +1292,15 @@ private struct MessageRow: View {
                     }
 
                 CodeReferenceRow(references: codeReferences, open: openCode)
+
+                // 답할 자리는 물음 바로 아래다. 위 카드는 지나친 것을 찾아갈
+                // 때 쓰고, 고르는 것은 여기서 한다.
+                if let choices = message.answers, !choices.isEmpty {
+                    AnswerChoices(
+                        choices: choices, given: message.given,
+                        isMine: isMine, pick: pick
+                    )
+                }
 
                 HStack(spacing: 7) {
                     Button(action: bookmark) {
@@ -1771,4 +1759,67 @@ private func contextColor(_ value: String) -> Color {
     let palette: [Color] = [.blue, .purple, .teal, .orange, .pink, .indigo, .green]
     let total = value.unicodeScalars.reduce(0) { $0 + Int($1.value) }
     return palette[total % palette.count]
+}
+
+
+/// 물음에 딸린 보기와 직접 쓰는 칸.
+///
+/// MessageRow 본문에 인라인으로 두면 그 뷰의 타입 검사가 한계를 넘는다.
+/// CodeReferenceRow 와 같은 이유로 떼어 둔다.
+private struct AnswerChoices: View {
+    let choices: [String]
+    let given: GivenAnswer?
+    let isMine: Bool
+    let pick: (String) -> Void
+    @State private var written = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(choices.enumerated()), id: \.offset) { index, choice in
+                choiceButton(index: index, choice: choice)
+            }
+            if let given, given.position == nil {
+                Label(given.text, systemImage: "checkmark.circle.fill")
+                    .font(.callout).foregroundStyle(.green)
+            } else if given == nil && !isMine {
+                writeRow
+            }
+        }
+        .frame(maxWidth: 420, alignment: .leading)
+    }
+
+    private func choiceButton(index: Int, choice: String) -> some View {
+        let picked = given?.position == index
+        return Button { if given == nil && !isMine { pick(choice) } } label: {
+            HStack(spacing: 7) {
+                Image(systemName: picked ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(picked ? .green : .secondary)
+                Text(choice).font(.callout)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 11).padding(.vertical, 7)
+        }
+        .buttonStyle(.bordered)
+        .disabled(given != nil || isMine)
+    }
+
+    private var writeRow: some View {
+        HStack(spacing: 6) {
+            TextField("직접 쓰기", text: $written)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(send)
+            Button("보내기", action: send).disabled(isBlank)
+        }
+    }
+
+    private var isBlank: Bool {
+        written.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func send() {
+        guard !isBlank else { return }
+        let text = written.trimmingCharacters(in: .whitespacesAndNewlines)
+        written = ""
+        pick(text)
+    }
 }

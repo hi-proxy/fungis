@@ -714,7 +714,8 @@ def test_old_syntax_fails_by_naming_what_replaced_it():
     assert "--to" in legacy_hint(["reply", "--role", "reviewer", "hi"])
     assert "--cc" in legacy_hint(["reply", "--reference", "pm", "hi"])
     assert "--reply" in legacy_hint(["send", "--in-reply-to", "42", "hi"])
-    assert "fungis send --project HQ --to" in legacy_hint(["ask", "ARCH", "hi"])
+    # ask 는 이름이 다시 살아났다. 폼으로 묻는 별도 수단이라 옛 안내를 걷었다.
+    assert legacy_hint(["ask", "본문", "--answer", "가"]) is None
     hint = legacy_hint(["reply", "--project", "mei", "hi"])
     assert "fungis send --project" in hint and "--reply N" in hint
     # 새 문법은 그대로 지나간다.

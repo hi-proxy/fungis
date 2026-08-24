@@ -1161,6 +1161,121 @@ def test_hq_addresses_a_room_by_name_and_reaches_its_lead(tmp_path):
         assert message.json()["recipient_ids"] == ["lead"]
 
 
+def test_a_question_carries_the_answers_it_offers(tmp_path):
+    """묻는 쪽이 보기를 적어 두면 답하는 쪽은 고르기만 한다.
+
+    보기는 본문에 적고 파싱하지 않는다. 표기가 바뀌면 깨지고, 무엇을 골랐는지
+    나중에 셀 수 없다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        join(client, "local", "agent")
+        asked = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "agent",
+                "recipient_ids": ["pm"], "kind": "pm_request", "reply_level": "r2",
+                "body": "지우기를 눌렀을 때 뜨는 문구를 확인하세요",
+                "answers": [
+                    "정말 삭제하시겠습니까?", "삭제합니다",
+                    # 빈 것과 중복은 고를 수 없으므로 걸러진다.
+                    "   ", "삭제합니다",
+                ],
+            },
+        )
+        assert asked.status_code == 201
+
+        attention = client.get("/v1/attention/pm").json()
+        assert attention[0]["answers"] == ["정말 삭제하시겠습니까?", "삭제합니다"]
+
+        # 보기를 안 준 물음은 빈 목록이다. 자유 입력만 받는다.
+        client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "agent",
+                "recipient_ids": ["pm"], "kind": "pm_request", "body": "어떻게 할까요",
+            },
+        )
+        assert client.get("/v1/attention/pm").json()[-1]["answers"] == []
+
+
+def test_an_answer_fills_the_question_instead_of_becoming_a_message(tmp_path):
+    """답은 메시지가 아니라 그 물음에 채워진다.
+
+    메시지면 묻는 쪽이 히스토리에서 물음을 되찾아 짝지어야 한다. 여기 채우면
+    물음 하나를 조회하는 것으로 질문·보기·답이 함께 나온다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        join(client, "local", "agent")
+        asked = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "agent",
+                "recipient_ids": ["pm"], "kind": "pm_request",
+                "body": "팝업 문구를 확인하세요",
+                "answers": ["정말 삭제하시겠습니까?", "삭제합니다"],
+            },
+        ).json()
+        seq = asked["seq"]
+
+        before = client.get(f"/v1/messages/{seq}/question").json()
+        assert before["given"] is None, "묻자마자 답이 차 있다"
+
+        filled = client.post(
+            f"/v1/messages/{seq}/answer",
+            json={"text": "삭제합니다", "answered_by": "pm"},
+        )
+        assert filled.status_code == 200
+        given = filled.json()["given"]
+        assert given["text"] == "삭제합니다"
+        assert given["position"] == 1, "고른 보기의 자리를 안 적었다"
+
+        # 한 번 채우면 끝이다.
+        assert client.post(
+            f"/v1/messages/{seq}/answer",
+            json={"text": "정말 삭제하시겠습니까?", "answered_by": "pm"},
+        ).status_code == 409
+
+        # 답이 타임라인에 글로 늘지 않는다.
+        timeline = client.get(
+            "/v1/workspaces/local/timeline", params={"caller": "pm"}
+        ).json()
+        assert not any(m["body"] == "삭제합니다" for m in timeline)
+
+        # 물은 쪽은 목록으로 미응답을 센다.
+        listed = client.get(
+            "/v1/workspaces/local/questions", params={"sender": "agent"}
+        ).json()
+        assert len(listed) == 1 and listed[0]["given"]["text"] == "삭제합니다"
+
+        # 직접 쓴 답은 자리가 없다.
+        other = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "local", "sender_id": "agent",
+                "recipient_ids": ["pm"], "kind": "pm_request",
+                "body": "또 다른 물음", "answers": ["가", "나"],
+            },
+        ).json()
+        client.post(
+            f"/v1/messages/{other['seq']}/answer",
+            json={"text": "보기에 없는 말", "answered_by": "pm"},
+        )
+        written = client.get(f"/v1/messages/{other['seq']}/question").json()
+        assert written["given"]["position"] is None
+
+
 def test_a_person_can_hold_a_role_and_is_not_told_to_run_init(tmp_path):
     """사람도 역할을 맡는다. 역할이 참가의 전제라 여기서 막으면 사람을 방
     하나에만 넣을 수 없다.

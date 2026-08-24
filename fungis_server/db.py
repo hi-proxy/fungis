@@ -225,6 +225,35 @@ CREATE VIEW IF NOT EXISTS memberships AS
       FROM projects p, principals pr
      WHERE pr.kind = 'human';
 
+-- 질의에 딸린 보기. 묻는 쪽이 미리 적어 두면 답하는 쪽은 고르기만 한다.
+--
+-- 본문에 적고 파싱하지 않는 이유는 둘이다. 원문 표기가 바뀌면 깨지고,
+-- 무엇을 골랐는지 나중에 셀 수 없다. 시나리오 층이 그 집계를 요구한다.
+--
+-- "기타"는 저장하지 않는다. 늘 붙는 것이라 적어 두면 지울 수 없는 보기가
+-- 하나 생긴다.
+CREATE TABLE IF NOT EXISTS message_answers (
+    message_seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (message_seq, position)
+);
+
+-- 폼의 답. **한 물음에 한 번만 채워진다** — 기본 키가 그것을 강제한다.
+--
+-- 답을 메시지로 만들지 않는 이유는 매칭을 없애기 위해서다. 메시지면 묻는
+-- 쪽이 히스토리에서 그 물음을 되찾아 짝지어야 하는데, 여기 채우면 물음을
+-- 조회하는 것만으로 질문·보기·답이 한 덩이로 나온다.
+--
+-- position 은 고른 보기의 자리다. 직접 쓴 답이면 NULL 이다.
+CREATE TABLE IF NOT EXISTS message_answer_given (
+    message_seq INTEGER PRIMARY KEY REFERENCES messages(seq) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    position INTEGER,
+    answered_by TEXT NOT NULL REFERENCES principals(id),
+    answered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS message_role_recipients (
     role_id TEXT NOT NULL REFERENCES workspace_roles(id),
     message_seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
@@ -1892,6 +1921,7 @@ class FungisDB:
         tags: list[str] | None = None,
         inherit_context: bool = True,
         later: bool = False,
+        answers: list[str] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if message_id is not None:
             with self._lock:
@@ -1952,6 +1982,12 @@ class FungisDB:
         ]
         normalized_track = track.strip() if track and track.strip() else None
         normalized_tags = self._normalize_tags(tags) if tags is not None else None
+        # 보기는 고르라고 주는 것이라 빈 것과 중복은 고를 수 없다.
+        normalized_answers = list(
+            dict.fromkeys(
+                text.strip() for text in (answers or []) if text and text.strip()
+            )
+        )
         with self.transaction() as conn:
             resolved_roles: list[tuple[str, str | None]] = []
             for role_id in unique_roles:
@@ -2011,6 +2047,12 @@ class FungisDB:
                 conn.execute(
                     "INSERT INTO message_tags(message_seq, tag) VALUES (?, ?)",
                     (message_seq, tag),
+                )
+            for position, answer in enumerate(normalized_answers):
+                conn.execute(
+                    "INSERT INTO message_answers(message_seq, position, text)"
+                    " VALUES (?, ?, ?)",
+                    (message_seq, position, answer),
                 )
             events: list[dict[str, Any]] = []
             for principal_id in unique_references:
@@ -2093,6 +2135,7 @@ class FungisDB:
         for row in rows:
             message = dict(row)
             message["tags"] = self._message_tags(message["seq"])
+            message["answers"] = self._message_answers(message["seq"])
             message["role_recipients"] = self._message_roles(message["seq"])
             result.append(message)
         return result
@@ -2173,6 +2216,8 @@ class FungisDB:
                 message["recipients"] = self._message_recipients(message["seq"])
                 message["references"] = self._message_references(message["seq"])
                 message["tags"] = self._message_tags(message["seq"])
+                message["answers"] = self._message_answers(message["seq"])
+                message["given"] = self._message_given(message["seq"])
                 message["role_recipients"] = self._message_roles(message["seq"])
                 result.append(message)
         return result
@@ -2314,6 +2359,116 @@ class FungisDB:
         ).fetchall()
         return [str(row["tag"]) for row in rows]
 
+    def _message_answers(self, message_seq: int) -> list[str]:
+        rows = self._connection.execute(
+            "SELECT text FROM message_answers WHERE message_seq = ? ORDER BY position",
+            (message_seq,),
+        ).fetchall()
+        return [str(row["text"]) for row in rows]
+
+    def answer_question(
+        self, *, message_seq: int, text: str, answered_by: str
+    ) -> dict[str, Any]:
+        """물음에 답을 채운다. **한 번 채우면 끝이다.**
+
+        보기와 같은 글이면 그 자리를 함께 적어 둔다 — 고른 것과 직접 쓴 것을
+        나중에 갈라 세려면 글자 비교로는 모자란다.
+        """
+        answer = text.strip()
+        if not answer:
+            raise ValueError("답이 비어 있다")
+        with self.transaction() as conn:
+            offered = [
+                str(row["text"])
+                for row in conn.execute(
+                    "SELECT text FROM message_answers WHERE message_seq = ?"
+                    " ORDER BY position",
+                    (message_seq,),
+                )
+            ]
+            if not offered:
+                raise LookupError("보기가 없는 글에는 답을 채울 수 없다")
+            if conn.execute(
+                "SELECT 1 FROM message_answer_given WHERE message_seq = ?",
+                (message_seq,),
+            ).fetchone() is not None:
+                raise ValueError("이미 답한 물음이다")
+            position = offered.index(answer) if answer in offered else None
+            conn.execute(
+                """INSERT INTO message_answer_given(
+                       message_seq, text, position, answered_by
+                   ) VALUES (?, ?, ?, ?)""",
+                (message_seq, answer, position, answered_by),
+            )
+            question = self._question(conn, message_seq)
+            # 물은 쪽을 깨운다. 답은 메시지가 아니라 인박스에 쌓이지 않으므로,
+            # 깨어난 뒤 무엇이 찼는지는 물음 조회가 답한다.
+            asked_by = conn.execute(
+                "SELECT sender_id FROM messages WHERE seq = ?", (message_seq,)
+            ).fetchone()
+            events = []
+            if asked_by is not None and str(asked_by["sender_id"]) != answered_by:
+                events.append(
+                    self._create_delivery_event(
+                        conn, str(asked_by["sender_id"]), message_seq
+                    )
+                )
+            question["events"] = events
+            return question
+
+    def question(self, message_seq: int) -> dict[str, Any]:
+        with self._lock:
+            return self._question(self._connection, message_seq)
+
+    def _question(self, conn: sqlite3.Connection, message_seq: int) -> dict[str, Any]:
+        """물음 하나를 완결된 한 덩이로. 질문·보기·답이 함께 나온다."""
+        row = conn.execute(
+            """SELECT m.seq, m.project_seq, m.workspace_id, m.body, m.created_at,
+                      p.display_name AS sender_name
+                 FROM messages m JOIN principals p ON p.id = m.sender_id
+                WHERE m.seq = ?""",
+            (message_seq,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no such message: {message_seq}")
+        question = dict(row)
+        question["answers"] = [
+            str(item["text"])
+            for item in conn.execute(
+                "SELECT text FROM message_answers WHERE message_seq = ? ORDER BY position",
+                (message_seq,),
+            )
+        ]
+        given = conn.execute(
+            "SELECT text, position, answered_at FROM message_answer_given"
+            " WHERE message_seq = ?",
+            (message_seq,),
+        ).fetchone()
+        question["given"] = dict(given) if given is not None else None
+        return question
+
+    def questions(self, *, workspace_id: str, sender_id: str) -> list[dict[str, Any]]:
+        """내가 물은 것들. 답이 찬 것과 안 찬 것을 함께 준다."""
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT DISTINCT m.seq FROM messages m
+                     JOIN message_answers a ON a.message_seq = m.seq
+                    WHERE m.workspace_id = ? AND m.sender_id = ?
+                    ORDER BY m.seq""",
+                (workspace_id, sender_id),
+            ).fetchall()
+            return [
+                self._question(self._connection, int(row["seq"])) for row in rows
+            ]
+
+    def _message_given(self, message_seq: int) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT text, position, answered_at FROM message_answer_given"
+            " WHERE message_seq = ?",
+            (message_seq,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def _message_roles(self, message_seq: int) -> list[dict[str, Any]]:
         rows = self._connection.execute(
             """SELECT mr.role_id, r.name, mr.delivered_agent_id, mr.delivered_at
@@ -2361,6 +2516,7 @@ class FungisDB:
                 message["recipients"] = self._message_recipients(message["seq"])
                 message["references"] = self._message_references(message["seq"])
                 message["tags"] = self._message_tags(message["seq"])
+                message["answers"] = self._message_answers(message["seq"])
                 message["role_recipients"] = self._message_roles(message["seq"])
                 result.append(message)
         return result
@@ -2393,6 +2549,7 @@ class FungisDB:
                 message["references"] = self._message_references(message["seq"])
                 message["tags"] = self._message_tags(message["seq"])
                 message["role_recipients"] = self._message_roles(message["seq"])
+                message["answers"] = self._message_answers(message["seq"])
                 result.append(message)
         return result
 

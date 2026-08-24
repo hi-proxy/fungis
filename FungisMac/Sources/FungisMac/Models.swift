@@ -196,12 +196,17 @@ struct ChatMessage: Decodable, Identifiable {
     var inReplyToProjectSeq: Int?
     var detectedContexts: [DetectedContext]
     var roleRecipients: [RoleRecipient]
+    /// 묻는 쪽이 적어 둔 보기. 없으면 그냥 글이다.
+    /// 옵셔널이어야 한다 — 없는 키 하나가 타임라인 전체를 못 읽게 만든다.
+    var answers: [String]?
+    /// 채워진 답. 답은 메시지가 아니라 물음 안에 산다.
+    var given: GivenAnswer?
     var id: Int { seq }
     /// 화면과 대화에서 부르는 번호. 에이전트가 보는 것과 같다.
     var displaySeq: Int { projectSeq ?? seq }
 
     enum CodingKeys: String, CodingKey {
-        case seq, body, recipients, references, track, tags
+        case seq, body, recipients, references, track, tags, answers, given
         case projectSeq = "project_seq"
         case createdAt = "created_at"
         case detectedContexts = "detected_contexts"
@@ -240,10 +245,16 @@ struct AttentionRequest: Decodable, Identifiable {
     var track: String?
     var tags: [String]
     var detectedContexts: [DetectedContext]
+    /// 묻는 쪽이 미리 적어 둔 보기. 없으면 자유 입력만 받는다.
+    ///
+    /// 옵셔널인 이유는 서버가 앱보다 낡을 수 있어서다. 기본값을 준다고
+    /// 되지 않는다 — 자동 디코딩은 키가 없으면 그대로 실패하고, 그러면
+    /// 스냅샷 전체가 안 읽혀 앱이 빈 화면이 된다.
+    var answers: [String]?
     var id: Int { seq }
 
     enum CodingKeys: String, CodingKey {
-        case seq, body, track, tags
+        case seq, body, track, tags, answers
         case detectedContexts = "detected_contexts"
         case pmRelation = "pm_relation"
         case senderID = "sender_id"
@@ -628,4 +639,11 @@ struct CodeReference: Hashable, Identifiable {
         }
         return found
     }
+}
+
+
+/// 물음에 채워진 답. position 이 있으면 보기를 고른 것, 없으면 직접 쓴 것이다.
+struct GivenAnswer: Decodable, Hashable {
+    var text: String
+    var position: Int?
 }

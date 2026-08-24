@@ -152,6 +152,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 물음에 답을 채운다. 타임라인에 내 말풍선이 생기지 않는다.
+    func answerQuestion(seq: Int, text: String) async -> Bool {
+        await mutate {
+            try await api.answerQuestion(
+                messageSeq: seq, projectID: selectedProjectID, text: text
+            )
+        }
+    }
+
     func send(
         _ body: String, to recipients: [String], roles: [String] = [],
         references: [String] = [],

@@ -203,6 +203,28 @@ class PMClient:
             raise PMServerError(f"role is not uniquely discoverable: {identity}")
         return str(matches[0]["id"])
 
+    def answer_question(self, message_seq: int, text: str) -> dict:
+        result = self._request(
+            "POST", f"/v1/messages/{message_seq}/answer",
+            {"text": text, "answered_by": str(self.pm_id)},
+        )
+        assert isinstance(result, dict)
+        return result
+
+    def questions(self, sender_id: str) -> list[dict]:
+        result = self._request(
+            "GET",
+            f"/v1/workspaces/{urllib.parse.quote(self.workspace_id)}/questions"
+            f"?sender={urllib.parse.quote(sender_id)}",
+        )
+        assert isinstance(result, list)
+        return result
+
+    def question(self, message_seq: int) -> dict:
+        result = self._request("GET", f"/v1/messages/{message_seq}/question")
+        assert isinstance(result, dict)
+        return result
+
     def targets(self) -> list[dict[str, Any]]:
         return list(self._targets)
 
@@ -353,6 +375,7 @@ class PMClient:
         later: bool = False,
         role_ids: list[str] | None = None,
         message_id: str | None = None,
+        answers: list[str] | None = None,
     ) -> dict:
         result = self._request(
             "POST",
@@ -382,6 +405,7 @@ class PMClient:
                 "tags": tags,
                 "inherit_context": inherit_context,
                 "later": later,
+                "answers": list(answers or []),
             },
         )
         assert isinstance(result, dict)

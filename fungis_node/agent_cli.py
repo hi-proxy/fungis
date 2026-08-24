@@ -105,8 +105,6 @@ LEGACY_FLAGS = {
                      'fungis send --reply N "..."',
 }
 
-LEGACY_ASK = 'ask 는 없어졌다.  fungis send --project HQ --to <방> "..."'
-
 LEGACY_REPLY_PROJECT = (
     "reply 의 --project 는 없어졌다. 답하려면 "
     'fungis send --project ... --reply N 을 쓴다'
@@ -116,8 +114,6 @@ LEGACY_REPLY_PROJECT = (
 def legacy_hint(argv: list[str]) -> str | None:
     """옛 문법이면 무엇으로 바뀌었는지 한 줄로 돌려준다."""
     command = next((item for item in argv if not item.startswith("-")), None)
-    if command == "ask":
-        return LEGACY_ASK
     for item in argv:
         name = item.split("=", 1)[0]
         if name in LEGACY_FLAGS:
@@ -201,6 +197,34 @@ Use role names as stable addresses; session names may change.""",
         "permission-clear",
         help="mark this session's pending permission notice as handled",
     )
+    ask = commands.add_parser(
+        "ask", help="ask a question with answers to pick from",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""A question is a form, not a conversation. The answer is filled
+into the question itself, so reading it back gives you question, choices and
+answer in one piece — you never match a reply to what you asked.
+
+  fungis ask "본문" --answer "이렇게 보인다" --answer "저렇게 보인다"
+  fungis ask list      how many are waiting, how many came back
+  fungis ask 12        one question with its answer
+
+Write what they would observe, not a verdict. A free-text box is always there,
+so an answer outside your list is still possible.
+""",
+    )
+    ask.add_argument(
+        "which", nargs="?",
+        help='list, or the number of one question. Omit it to ask a new one',
+    )
+    ask.add_argument("body", nargs="*", help="question body")
+    ask.add_argument(
+        "--answer", action="append", default=[], metavar="TEXT",
+        help="an answer they can pick; repeat for more",
+    )
+    ask.add_argument(
+        "-p", "--project", help="room to ask in; defaults to your own room"
+    )
+
     board = commands.add_parser(
         "board", help="read the cross-project board, or put your work on it"
     )
@@ -364,6 +388,12 @@ def add_addressing(
         command.add_argument(
             "--level", choices=("r1", "r2", "r3"), default="r2",
             help="attention level: r1 info, r2 review, r3 blocks your next step",
+        )
+        command.add_argument(
+            "--answer", action="append", default=[], metavar="TEXT",
+            help="an answer they can pick instead of typing; repeat for more. "
+                 "Write what they would observe, not a verdict. "
+                 "A free-text box is always added",
         )
     command.add_argument(
         "-t", "--to", action="append", default=[],
@@ -962,6 +992,67 @@ def room_people(client) -> list[str]:
     return found
 
 
+def render_ask(client, binding: dict, args) -> str:
+    """묻기·목록·조회 셋을 한 명령이 나눠 맡는다.
+
+    답은 그 물음에 채워지므로, 조회 한 번이면 질문·보기·답이 함께 나온다.
+    무엇을 물었는지 되짚을 일이 없다.
+    """
+    sender = str(binding["principal_id"])
+    if args.which == "list":
+        rows = client.questions(sender)
+        waiting = [item for item in rows if item.get("given") is None]
+        lines = [
+            f"asked {len(rows)}, waiting {len(waiting)}, answered "
+            f"{len(rows) - len(waiting)}"
+        ]
+        for item in rows:
+            mark = "…" if item.get("given") is None else "✓"
+            lines.append(
+                f'  {mark} {item.get("project_seq") or item["seq"]}  '
+                f'{(item["body"] or "").splitlines()[0][:56]}'
+            )
+        return "\n".join(lines)
+
+    if args.which and args.which.isdigit():
+        # 화면 번호는 방마다 1부터 센다. 내가 물은 것들 중에서 찾는다.
+        wanted = int(args.which)
+        for item in client.questions(sender):
+            if (item.get("project_seq") or item["seq"]) == wanted:
+                return render_question(item)
+        raise ValueError(f"{wanted} 번은 네가 물은 것이 아니다. fungis ask list")
+
+    body = " ".join(([args.which] if args.which else []) + list(args.body)).strip()
+    if not body:
+        raise ValueError('물을 것을 적어라: fungis ask "..." --answer "..."')
+    if not args.answer:
+        raise ValueError(
+            "보기가 없으면 그냥 물음이다. 골라 줄 것을 하나 이상 적어라:\n"
+            '  fungis ask "..." --answer "이렇다" --answer "저렇다"'
+        )
+    stored = client.send_as(
+        binding["local_name"], None, body,
+        recipient_ids=default_recipients(client, "request"),
+        kind="pm_request", reply_level="r2", answers=args.answer,
+    )
+    return json.dumps({"asked": stored}, ensure_ascii=False, separators=(",", ":"))
+
+
+def render_question(question: dict) -> str:
+    """질문·보기·답을 한 덩이로 그린다."""
+    number = question.get("project_seq") or question["seq"]
+    lines = [f'#{number} {question["body"]}']
+    given = question.get("given")
+    for position, choice in enumerate(question.get("answers") or []):
+        picked = given is not None and given.get("position") == position
+        lines.append(f'  {"✓" if picked else " "} {choice}')
+    if given is None:
+        lines.append("  아직 답이 없다")
+    elif given.get("position") is None:
+        lines.append(f'  ✓ (직접 씀) {given["text"]}')
+    return "\n".join(lines)
+
+
 def read_state(client, binding: dict, given: str | None) -> str:
     """부작용 없이 처지만 읽는다. init은 활성 프로젝트를 바꾸므로 못 쓴다."""
     agent_id = binding["principal_id"]
@@ -1242,6 +1333,18 @@ def main() -> None:
                     separators=(",", ":"),
                 )
             )
+        elif args.command == "ask":
+            mine = active_project(registry, binding["principal_id"])
+            client = PMClient(
+                config["server"], registry,
+                workspace_id=resolve_project(
+                    PMClient(config["server"], registry, workspace_id=mine,
+                             caller_id=binding["principal_id"]),
+                    args.project, mine,
+                ),
+                caller_id=binding["principal_id"],
+            )
+            print(render_ask(client, binding, args))
         elif args.command == "board":
             client = PMClient(
                 config["server"], registry,
@@ -1297,6 +1400,7 @@ def main() -> None:
                 absolute_reference_ids=cc_ids,
                 kind="pm_request" if args.command == "request" else "message",
                 reply_level=args.level if args.command == "request" else "r1",
+                answers=getattr(args, "answer", None),
                 in_reply_to_project_seq=in_reply_to,
                 track=args.track,
                 tags=args.tag,

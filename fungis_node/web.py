@@ -306,6 +306,11 @@ class PMProfilePayload(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
 
 
+class AnswerPayload(BaseModel):
+    project_id: str
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class RepositoryPayload(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
@@ -1018,6 +1023,14 @@ def create_web_app(
             raise HTTPException(status_code=403, detail=str(error)) from error
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/questions/{message_seq}/answer")
+    def answer_question(message_seq: int, payload: AnswerPayload) -> dict:
+        try:
+            with client(payload.project_id) as pm:
+                return pm.answer_question(message_seq, payload.text)
+        except Exception as error:
+            raise fail(error) from error
 
     @app.get("/api/projects")
     def projects() -> list[dict]:
