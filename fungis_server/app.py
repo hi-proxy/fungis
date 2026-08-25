@@ -256,9 +256,9 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         # 방이 없으면 먼저 만든다. 참가는 (방 × 사람) 을 세는 것이라, 방이
         # 없으면 셀 자리가 없어 아무도 못 들어간다 — 사람도 마찬가지다.
         db.ensure_workspace(payload.workspace_id)
-        # 남의 방에 글을 남길 수는 없다. 읽기 경계와 같은 판정을 쓴다 — HQ는
-        # 소속이 아니라 lead 여부로 열리고, 그 규칙이 이미 여기 들어 있다.
-        guard_participant(payload.workspace_id, payload.sender_id)
+        # 남의 방에 글을 남길 수는 없다. 읽기와 거의 같은 판정인데 한 갈래가
+        # 빠진다 — 전역으로 열린 방은 보는 자리지 말하는 자리가 아니다.
+        guard_speaker(payload.workspace_id, payload.sender_id)
         in_reply_to = payload.in_reply_to
         if payload.in_reply_to_project_seq is not None:
             if in_reply_to is not None:
@@ -513,6 +513,27 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             status_code=403,
             detail=db.participation_denied(
                 workspace_id=workspace_id, principal_id=caller
+            ),
+        )
+
+    def guard_speaker(workspace_id: str, sender: str) -> None:
+        """말하는 것은 읽는 것보다 좁다. db.workspace_speaker 참고."""
+        if db.workspace_speaker(workspace_id=workspace_id, principal_id=sender):
+            return
+        if db.workspace_participant(
+            workspace_id=workspace_id, principal_id=sender
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "you read this room as a global participant, which does not"
+                    " let you speak in it — speak where you hold a role"
+                ),
+            )
+        raise HTTPException(
+            status_code=403,
+            detail=db.participation_denied(
+                workspace_id=workspace_id, principal_id=sender
             ),
         )
 

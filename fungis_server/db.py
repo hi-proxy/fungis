@@ -557,6 +557,13 @@ class FungisDB:
         self._connection.execute(
             "INSERT OR IGNORE INTO projects(id, name, kind) VALUES ('hq', 'HQ', 'hq')"
         )
+        # 비서실도 같은 이유로 처음부터 둔다. 프로젝트 위가 아니라 옆에 선
+        # 방이라 부모가 없고, 역할을 두는 것은 여느 방과 같다 — 비서가 앉는
+        # 자리가 곧 그 역할이다.
+        self._connection.execute(
+            "INSERT OR IGNORE INTO projects(id, name, kind)"
+            " VALUES ('aide', '비서실', 'aide')"
+        )
         self._backfill_ticket_prefixes()
         for table in ("workspace_roles", "messages", "shared_values", "work_items"):
             rows = self._connection.execute(
@@ -815,6 +822,26 @@ class FungisDB:
             return self._connection.execute(
                 """SELECT 1 FROM memberships
                     WHERE workspace_id = ? AND principal_id = ? LIMIT 1""",
+                (workspace_id, principal_id),
+            ).fetchone() is not None
+
+    def workspace_speaker(self, *, workspace_id: str, principal_id: str) -> bool:
+        """읽어도 되는 것과 말해도 되는 것이 같지 않은 자리가 하나 있다.
+
+        전역 참가자는 방을 가리지 않고 **본다.** 그것이 필요해서 준 것이다 —
+        방 사이를 보려면 방 하나로는 안 된다. 그런데 같은 자격으로 말까지 하면
+        일하는 방을 직접 움직이게 되고, 그것은 보는 자리가 아니라 지휘하는
+        자리다. 지휘 사슬이 한 겹 늘어난다.
+
+        선은 **무엇을 하나가 아니라 누구에게 하나**로 긋는다. 전역으로 열린
+        방에서는 읽기만이고, 말은 제 역할이 있는 방에서 한다. 약속이 아니라
+        여기서 갈라 두는 것이 요점이다 — 약속은 잊히고 이 판정은 안 잊힌다.
+        """
+        with self._lock:
+            return self._connection.execute(
+                """SELECT 1 FROM memberships
+                    WHERE workspace_id = ? AND principal_id = ?
+                      AND source != 'global' LIMIT 1""",
                 (workspace_id, principal_id),
             ).fetchone() is not None
 

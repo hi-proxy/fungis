@@ -1320,6 +1320,54 @@ def test_a_global_participant_sees_every_room(tmp_path):
         ).status_code == 200
 
 
+def test_a_global_participant_reads_every_room_and_speaks_in_none(tmp_path):
+    """보는 자리와 말하는 자리를 가른다.
+
+    전역으로 보게 한 것은 방 사이를 보라는 것이었다. 같은 자격으로 말까지 하면
+    일하는 방을 직접 움직이게 되고, 그러면 지휘 사슬이 한 겹 는다. 약속으로
+    두면 잊히므로 판정으로 둔다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("aide-agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "alpha", "name": "alpha"})
+        client.put("/v1/global-participants/aide-agent")
+
+        def say(room):
+            return client.post(
+                "/v1/messages",
+                json={
+                    "workspace_id": room, "sender_id": "aide-agent",
+                    "recipient_ids": ["pm"], "body": "…",
+                },
+            )
+
+        assert client.get(
+            "/v1/workspaces/alpha/timeline", params={"caller": "aide-agent"}
+        ).status_code == 200, "읽기는 전역이다"
+        denied = say("alpha")
+        assert denied.status_code == 403
+        assert "role" in denied.json()["detail"], "왜 막혔는지 말해야 고칠 수 있다"
+
+        # 비서실은 처음부터 있다. 거기 역할을 받으면 그 방에서는 말한다.
+        assert client.get("/v1/projects").json()
+        join(client, "aide", "aide-agent")
+        assert say("aide").status_code == 201
+
+        # 사람은 그대로다. 전역 참가자가 아니라 주인 자격으로 열린다.
+        assert client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "alpha", "sender_id": "pm",
+                "recipient_ids": ["aide-agent"], "body": "…",
+            },
+        ).status_code == 201
+
+
 def test_overview_counts_questions_not_the_choices_in_them(tmp_path):
     """전사 시야는 세는 값으로만 만든다. 적어 넣으면 갱신을 잊는 날 거짓이 된다.
 
