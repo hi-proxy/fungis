@@ -1321,12 +1321,7 @@ def test_a_global_participant_sees_every_room(tmp_path):
 
 
 def test_a_global_participant_reads_every_room_and_speaks_in_none(tmp_path):
-    """보는 자리와 말하는 자리를 가른다.
-
-    전역으로 보게 한 것은 방 사이를 보라는 것이었다. 같은 자격으로 말까지 하면
-    일하는 방을 직접 움직이게 되고, 그러면 지휘 사슬이 한 겹 는다. 약속으로
-    두면 잊히므로 판정으로 둔다.
-    """
+    """전역으로 보게 한 것은 방 사이를 보라는 것이지 끼어들라는 것이 아니다."""
     app = create_app(tmp_path / "api.db")
     with TestClient(app) as client:
         for principal_id, kind in (("pm", "human"), ("aide-agent", "agent")):
@@ -1369,11 +1364,7 @@ def test_a_global_participant_reads_every_room_and_speaks_in_none(tmp_path):
 
 
 def test_overview_counts_questions_not_the_choices_in_them(tmp_path):
-    """전사 시야는 세는 값으로만 만든다. 적어 넣으면 갱신을 잊는 날 거짓이 된다.
-
-    미답은 특히 틀리기 쉽다 — 질문 하나에 선택지가 여럿이라 그냥 세면 선택지
-    수가 나온다. 두 자리 질문 하나를 두고 1 이 나오는지 본다.
-    """
+    """질문 하나에 선택지가 여럿이라, 그냥 세면 미답이 선택지 수만큼 부푼다."""
     app = create_app(tmp_path / "api.db")
     with TestClient(app) as client:
         for principal_id, kind in (("pm", "human"), ("aide", "agent")):

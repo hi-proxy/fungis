@@ -721,11 +721,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
 
     @app.get("/v1/overview")
     def overview(caller: str = Query(min_length=1)) -> list[dict]:
-        """방 하나하나가 아니라 전부를 가로질러 본다.
-
-        그래서 경계도 방 단위가 아니다 — 한 방의 역할로 앉은 에이전트는
-        제 방만 본다. 가로지르는 시야는 사람과 전역 참가자의 몫이다.
-        """
+        """방을 가로질러 보므로 경계도 방 단위가 아니다."""
         if (
             db.principal_kind(caller) != "human"
             and caller not in db.global_participants()
