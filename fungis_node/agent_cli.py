@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -223,6 +224,19 @@ so an answer outside your list is still possible.
     )
     ask.add_argument(
         "-p", "--project", help="room to ask in; defaults to your own room"
+    )
+
+    commands.add_parser(
+        "overview", help="one line per room, across all of them",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Every column is counted, none is written down — so it cannot go
+stale and there is nothing to keep up to date.
+
+Reach for it when you need the wide view without reading the rooms: reading
+them costs context you then no longer have for the work itself.
+
+'quiet' is days since anyone spoke there. A room nobody has opened shows '-'.
+""",
     )
 
     board = commands.add_parser(
@@ -992,6 +1006,35 @@ def room_people(client) -> list[str]:
     return found
 
 
+def _display_width(text: str) -> int:
+    """방 이름에 한글이 섞이면 글자 수와 칸 수가 다르다."""
+    return sum(
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text
+    )
+
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - _display_width(text))
+
+
+def render_overview(rows: list[dict]) -> str:
+    """방마다 한 줄. 넓게 보는 데 드는 맥락을 조회 한 번으로 줄인다."""
+    if not rows:
+        return "no rooms"
+    names = [str(row["name"]) for row in rows]
+    width = max(max(_display_width(name) for name in names), 4)
+    lines = [f"{_pad('room', width)}  quiet  todo  doing  done  waiting"]
+    for row in rows:
+        quiet = row.get("quiet_days")
+        lines.append(
+            f"{_pad(str(row['name']), width)}  "
+            f"{'-' if quiet is None else quiet:>5}  "
+            f"{row['todo']:>4}  {row['active']:>5}  {row['done']:>4}  "
+            f"{row['unanswered']:>7}"
+        )
+    return "\n".join(lines)
+
+
 def render_ask(client, binding: dict, args) -> str:
     """묻기·목록·조회 셋을 한 명령이 나눠 맡는다.
 
@@ -1333,6 +1376,13 @@ def main() -> None:
                     separators=(",", ":"),
                 )
             )
+        elif args.command == "overview":
+            client = PMClient(
+                config["server"], registry,
+                workspace_id=active_project(registry, binding["principal_id"]),
+                caller_id=binding["principal_id"],
+            )
+            print(render_overview(client.overview(str(binding["principal_id"]))))
         elif args.command == "ask":
             mine = active_project(registry, binding["principal_id"])
             client = PMClient(

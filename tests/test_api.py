@@ -1320,6 +1320,51 @@ def test_a_global_participant_sees_every_room(tmp_path):
         ).status_code == 200
 
 
+def test_overview_counts_questions_not_the_choices_in_them(tmp_path):
+    """전사 시야는 세는 값으로만 만든다. 적어 넣으면 갱신을 잊는 날 거짓이 된다.
+
+    미답은 특히 틀리기 쉽다 — 질문 하나에 선택지가 여럿이라 그냥 세면 선택지
+    수가 나온다. 두 자리 질문 하나를 두고 1 이 나오는지 본다.
+    """
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("aide", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "alpha", "name": "alpha"})
+        client.post("/v1/projects", json={"id": "quiet-one", "name": "quiet-one"})
+        join(client, "alpha", "aide")
+        client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "alpha", "sender_id": "aide",
+                "recipient_ids": ["pm"], "body": "which one",
+                "answers": ["this", "that", "the other"],
+            },
+        )
+
+        rooms = {row["name"]: row for row in client.get(
+            "/v1/overview", params={"caller": "pm"}
+        ).json()}
+        assert rooms["alpha"]["unanswered"] == 1, "선택지 세 개를 셋으로 세면 안 된다"
+        assert rooms["alpha"]["quiet_days"] == 0
+        # 아무도 열지 않은 방은 조용한 정도를 잴 수가 없다. 0 으로 접으면 방금
+        # 대화한 방과 구별이 사라진다.
+        assert rooms["quiet-one"]["last_said"] is None
+        assert rooms["quiet-one"]["quiet_days"] is None
+
+        # 가로지르는 시야는 방 경계 밖이라 방 소속으로는 열리지 않는다.
+        assert client.get(
+            "/v1/overview", params={"caller": "aide"}
+        ).status_code == 403
+        client.put("/v1/global-participants/aide")
+        assert client.get(
+            "/v1/overview", params={"caller": "aide"}
+        ).status_code == 200
+
+
 def test_a_person_can_hold_a_role_and_is_not_told_to_run_init(tmp_path):
     """사람도 역할을 맡는다. 역할이 참가의 전제라 여기서 막으면 사람을 방
     하나에만 넣을 수 없다.

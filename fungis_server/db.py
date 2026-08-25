@@ -2501,6 +2501,54 @@ class FungisDB:
         question["given"] = dict(given) if given is not None else None
         return question
 
+    def overview(self) -> list[dict[str, Any]]:
+        """방마다 한 줄. 전부 센 값이고 적어 넣는 칸은 없다.
+
+        적어 넣으면 갱신을 잊는 날 거짓이 된다. 낡은 현황판은 없느니만
+        못하므로 여기 담는 것은 물어보면 나오는 것으로 한정한다.
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                WITH said AS (
+                    SELECT workspace_id AS w, MAX(created_at) AS last
+                    FROM messages GROUP BY workspace_id
+                ),
+                board AS (
+                    SELECT project_id AS w,
+                           SUM(status = 'todo') AS todo,
+                           SUM(status = 'active') AS active,
+                           SUM(status = 'done') AS done
+                    FROM board_nodes GROUP BY project_id
+                ),
+                -- 질문 하나에 선택지가 여럿이다. DISTINCT 없이는 선택지를
+                -- 세게 되고 미답이 부풀어 보인다.
+                waiting AS (
+                    SELECT m.workspace_id AS w,
+                           COUNT(DISTINCT m.seq) AS unanswered
+                    FROM messages m
+                    JOIN message_answers a ON a.message_seq = m.seq
+                    LEFT JOIN message_answer_given g ON g.message_seq = m.seq
+                    WHERE g.message_seq IS NULL
+                    GROUP BY m.workspace_id
+                )
+                SELECT p.id, p.name, p.kind, said.last AS last_said,
+                       CAST(julianday('now') - julianday(said.last) AS INTEGER)
+                           AS quiet_days,
+                       COALESCE(board.todo, 0) AS todo,
+                       COALESCE(board.active, 0) AS active,
+                       COALESCE(board.done, 0) AS done,
+                       COALESCE(waiting.unanswered, 0) AS unanswered
+                FROM projects p
+                LEFT JOIN said ON said.w = p.id
+                LEFT JOIN board ON board.w = p.id
+                LEFT JOIN waiting ON waiting.w = p.id
+                WHERE p.archived_at IS NULL
+                ORDER BY said.last IS NULL, said.last DESC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def questions(self, *, workspace_id: str, sender_id: str) -> list[dict[str, Any]]:
         """내가 물은 것들. 답이 찬 것과 안 찬 것을 함께 준다."""
         with self._lock:

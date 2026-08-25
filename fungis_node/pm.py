@@ -225,6 +225,13 @@ class PMClient:
         assert isinstance(result, dict)
         return result
 
+    def overview(self, caller_id: str) -> list[dict]:
+        result = self._request(
+            "GET", f"/v1/overview?caller={urllib.parse.quote(caller_id)}"
+        )
+        assert isinstance(result, list)
+        return result
+
     def targets(self) -> list[dict[str, Any]]:
         return list(self._targets)
 
