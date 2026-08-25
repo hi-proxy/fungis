@@ -14,6 +14,7 @@ struct MessageBodyView: View {
     let seed: Int
     /// 내 말풍선은 바탕이 진해서 옅은 회색 배경이 안 보인다.
     let isMine: Bool
+    @AppStorage(BodyScale.key) private var step = BodyScale.normal
 
     /// 그릴 조각. 표가 경계고, 표 사이의 모든 블록은 한 덩이로 합쳐진다.
     private enum Piece {
@@ -76,7 +77,7 @@ struct MessageBodyView: View {
 
         case let .heading(level, text):
             var painted = MessagePrettyPrinter.inlineText(text, seed: seed)
-            painted.font = level <= 2 ? .title3.bold() : .body.bold()
+            painted.font = BodyScale.font(level <= 2 ? .title3 : .body, step).bold()
             return painted
 
         case let .bullets(items):
@@ -97,13 +98,13 @@ struct MessageBodyView: View {
         case let .quote(text):
             // 세로 막대를 못 쓴다. 기울임과 낮춘 색으로 대신한다.
             var painted = MessagePrettyPrinter.inlineText(text, seed: seed)
-            painted.font = .body.italic()
+            painted.font = BodyScale.font(.body, step).italic()
             painted.foregroundColor = dimColor
             return painted
 
         case let .code(text):
             var painted = AttributedString(text)
-            painted.font = .system(.callout, design: .monospaced)
+            painted.font = BodyScale.font(.callout, step, monospaced: true)
             painted.backgroundColor = plateColor
             return painted
 

@@ -1202,6 +1202,35 @@ private struct AttentionCard: View {
     }
 }
 
+/// 본문 글자 크기.
+///
+/// **macOS 는 Dynamic Type 을 따르지 않는다.** `.dynamicTypeSize` 를 걸어도
+/// `.body` 는 그대로라, 크기를 직접 재서 준다.
+enum BodyScale {
+    static let key = "bodyTextScale"
+    static let normal = 3
+    static let last = 6
+
+    /// 뷰가 아닌 곳(`AttributedString` 을 짓는 static 함수)에서 읽는 값.
+    /// 다시 그리는 것은 `@AppStorage` 를 든 뷰가 맡는다.
+    static var current: Int {
+        UserDefaults.standard.object(forKey: key) as? Int ?? normal
+    }
+
+    static func points(_ style: NSFont.TextStyle, _ step: Int) -> CGFloat {
+        NSFont.preferredFont(forTextStyle: style).pointSize
+            * pow(1.15, CGFloat(min(max(step, 0), last) - normal))
+    }
+
+    static func font(
+        _ style: NSFont.TextStyle, _ step: Int, monospaced: Bool = false
+    ) -> Font {
+        .system(
+            size: points(style, step), design: monospaced ? .monospaced : .default
+        )
+    }
+}
+
 private struct MessageRow: View {
     let message: ChatMessage
     let pmID: String
@@ -1220,6 +1249,7 @@ private struct MessageRow: View {
     /// 정형 안내문(init·lead 지정)은 기본 접힘. 매번 전문이 펼쳐져 있으면
     /// 타임라인에서 사람 말이 밀려난다.
     @State private var expanded = false
+    @AppStorage(BodyScale.key) private var bodyScale = BodyScale.normal
 
     private static let boilerplateTags: Set<String> = [
         "fungis-init", "onboarding", "lead-notice",
@@ -1276,7 +1306,7 @@ private struct MessageRow: View {
                     //
                     // 줄 사이 여백은 세로 패딩으로 대신한다. 선택 여부와 무관해서
                     // 다시 잴 일이 없다.
-                    .font(.body).textSelection(.enabled)
+                    .font(BodyScale.font(.body, bodyScale)).textSelection(.enabled)
                     // 원문과 Pretty는 줄 수가 다르다. 뒤집힌 LazyVStack 안에서는
                     // 바뀐 높이가 다시 제안되지 않아 아래가 잘린다. Text가 자기
                     // 높이를 그대로 말하게 둔다.

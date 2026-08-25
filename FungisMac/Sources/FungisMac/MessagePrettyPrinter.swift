@@ -139,7 +139,7 @@ enum MessagePrettyPrinter {
                 result.append(highlighted(text, seed: seed))
             case let .code(text):
                 var styled = AttributedString(text)
-                styled.font = .system(.body, design: .monospaced)
+                styled.font = BodyScale.font(.body, BodyScale.current, monospaced: true)
                 // 파란 말풍선 위에서도 띠가 보여야 한다. 0.18 은 거기서 묻혔다.
                 styled.backgroundColor = Color.secondary.opacity(0.28)
                 result.append(styled)

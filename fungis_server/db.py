@@ -2621,6 +2621,11 @@ class FungisDB:
                     WHERE answer.in_reply_to = m.seq
                       AND answer.sender_id = ?
                   )
+                  -- 폼으로 답한 것은 답장 메시지를 남기지 않는다. 이걸 안 보면
+                  -- 답을 채워도 물음이 계속 떠 있다.
+                  AND NOT EXISTS (
+                    SELECT 1 FROM message_answer_given g WHERE g.message_seq = m.seq
+                  )
                 ORDER BY CASE m.reply_level
                   WHEN 'r3' THEN 3 WHEN 'r2' THEN 2 ELSE 1 END DESC,
                   m.seq ASC
@@ -2652,6 +2657,9 @@ class FungisDB:
                     JOIN principals answerer ON answerer.id = answer.sender_id
                     WHERE answer.in_reply_to = m.seq
                       AND answerer.kind = 'human'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM message_answer_given g WHERE g.message_seq = m.seq
                   )
                 ORDER BY CASE m.reply_level
                   WHEN 'r3' THEN 3 WHEN 'r2' THEN 2 ELSE 1 END DESC,

@@ -1320,6 +1320,41 @@ def test_a_global_participant_sees_every_room(tmp_path):
         ).status_code == 200
 
 
+def test_a_filled_question_stops_asking_for_attention(tmp_path):
+    """폼으로 답하면 답장 메시지가 안 생긴다 — 그것만 보면 물음이 안 내려간다."""
+    app = create_app(tmp_path / "api.db")
+    with TestClient(app) as client:
+        for principal_id, kind in (("pm", "human"), ("agent", "agent")):
+            client.put(
+                f"/v1/principals/{principal_id}",
+                json={"id": principal_id, "kind": kind, "display_name": principal_id},
+            )
+        client.post("/v1/projects", json={"id": "alpha", "name": "alpha"})
+        join(client, "alpha", "agent")
+        asked = client.post(
+            "/v1/messages",
+            json={
+                "workspace_id": "alpha", "sender_id": "agent",
+                "recipient_ids": ["pm"], "body": "which one",
+                "kind": "pm_request", "answers": ["this", "that"],
+            },
+        ).json()
+
+        def waiting():
+            return [
+                item["seq"] for item in client.get(
+                    "/v1/workspaces/alpha/attention", params={"caller": "pm"}
+                ).json()
+            ]
+
+        assert asked["seq"] in waiting()
+        client.post(
+            f"/v1/messages/{asked['seq']}/answer",
+            json={"text": "this", "answered_by": "pm"},
+        )
+        assert asked["seq"] not in waiting()
+
+
 def test_a_global_participant_reads_every_room_and_speaks_in_none(tmp_path):
     """전역으로 보게 한 것은 방 사이를 보라는 것이지 끼어들라는 것이 아니다."""
     app = create_app(tmp_path / "api.db")

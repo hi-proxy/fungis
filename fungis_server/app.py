@@ -78,6 +78,29 @@ class EventHub:
             await self.disconnect(event["recipient_id"], websocket)
 
 
+def _source_fingerprint() -> tuple | None:
+    """이 프로세스가 든 소스의 지문. (경로, mtime, 크기) 목록이며 `.py` 만 본다.
+
+    파이썬을 고쳐도 서버는 뜬 채로 남는다. 그러면 고친 대로 안 도는데 health 는
+    200 이라, 결과를 보고 "안 고쳐졌다" 는 엉뚱한 진단으로 간다. 밖에서 물을 수
+    있어야 그 갈래가 없어진다.
+
+    daemon 이 같은 장치를 이미 갖고 있다(`fungis_node/web.py`). 거기 것을 가져다
+    쓰지 않는 것은 서버가 노드를 알면 의존이 거꾸로 서기 때문이다.
+    """
+    root = Path(__file__).parent
+    if not root.is_dir():
+        return None
+    entries: list[tuple[str, int, int]] = []
+    for path in sorted(root.rglob("*.py")):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((str(path), stat.st_mtime_ns, stat.st_size))
+    return tuple(entries) or None
+
+
 def create_app(database_path: str | Path | None = None) -> FastAPI:
     if database_path is None:
         database_path = os.environ.get(
@@ -85,6 +108,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         )
     db = FungisDB(database_path)
     hub = EventHub()
+    startup_fingerprint = _source_fingerprint()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -122,8 +146,17 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         return JSONResponse(status_code=409, content={"detail": str(error)})
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, object]:
+        current = _source_fingerprint()
+        return {
+            "status": "ok",
+            # 못 재는 경우(패키징된 배포 등)를 낡았다고 하면 재시작 루프가 된다.
+            "stale": (
+                startup_fingerprint is not None
+                and current is not None
+                and current != startup_fingerprint
+            ),
+        }
 
     @app.post("/v1/principals", status_code=201)
     def create_principal(payload: PrincipalCreate) -> dict:
