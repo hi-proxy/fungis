@@ -448,6 +448,14 @@ class FungisDB:
             "CREATE INDEX IF NOT EXISTS idx_messages_project_seq"
             " ON messages(workspace_id, project_seq)"
         )
+        # 인박스를 읽을 때마다 메시지마다 `agent_chain` 을 센다 — 그 방에서
+        # 사람이 마지막으로 말한 뒤 몇 번 오갔는지. 방 번호로만 찾을 수 있으면
+        # 그 방 전체를 훑고, 그것을 가져오는 메시지 수만큼 되풀이한다.
+        # 방이 3천 줄쯤 되자 10건 읽는 데 23초가 걸렸다.
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS messages_workspace_seq"
+            " ON messages(workspace_id, seq)"
+        )
         role_columns = {
             row["name"]
             for row in self._connection.execute("PRAGMA table_info(workspace_roles)")
