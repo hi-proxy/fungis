@@ -524,3 +524,38 @@ def test_tty_exists_says_no_for_a_missing_device(tmp_path):
     assert not tty_exists("ttys99999")
     # 어느 기계에나 있는 장치로 참을 확인한다.
     assert tty_exists("null")
+
+
+def _candidate(session_id: str) -> CmuxAgentCandidate:
+    return CmuxAgentCandidate(
+        provider="codex", agent_session_id=session_id,
+        surface_id="surface-1", surface_ref="surface:1",
+        workspace_ref="workspace:1", title="agent", tty="ttys001",
+        cwd="/project", lifecycle="idle", binding_verified=True,
+        verification_reason="codex_transcript_hook_surface",
+    )
+
+
+def test_a_new_session_drops_the_wake_the_old_one_never_confirmed(tmp_path):
+    """앞 세션에 보낸 깨우기는 확인될 리가 없다.
+
+    게이트는 미확인 깨우기가 있으면 다음 것을 보내지 않는다. 받을 상대가
+    사라졌는데 시한이 다 갈 때까지 세고 있으면, 새로 붙인 에이전트가 붙자마자
+    기다리게 된다.
+    """
+    registry = LocalRegistry(tmp_path / "node.db")
+    try:
+        registry.attach("agent-1", _candidate("session-old"))
+        principal = registry.binding("agent-1")["principal_id"]
+        registry.record_wake(principal, 42)
+        assert registry.outstanding_wake(principal) is not None
+
+        # 같은 세션을 다시 확인하는 것으로는 지우지 않는다. 살아 있는 깨우기를
+        # 지우면 같은 자리를 두 번 찌른다.
+        registry.attach("agent-1", _candidate("session-old"))
+        assert registry.outstanding_wake(principal) is not None
+
+        registry.attach("agent-1", _candidate("session-new"))
+        assert registry.outstanding_wake(principal) is None
+    finally:
+        registry.close()

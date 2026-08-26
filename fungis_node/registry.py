@@ -238,6 +238,10 @@ class LocalRegistry:
 
     def attach(self, local_name: str, candidate: CmuxAgentCandidate) -> dict[str, Any]:
         data = asdict(candidate)
+        previous = self.connection.execute(
+            "SELECT principal_id, agent_session_id FROM bindings WHERE local_name = ?",
+            (local_name,),
+        ).fetchone()
         # 창 하나에 에이전트 하나다. 같은 창을 다시 써서 새 세션을 띄우면 옛
         # binding은 갈 곳이 없다. 놔두면 서버의 창 단위 유일 제약에 걸려
         # sync가 통째로 409를 내고, 배정도 연결도 전부 막힌다. 화면에는
@@ -281,6 +285,24 @@ class LocalRegistry:
                 json.dumps(data),
             ),
         )
+        # 세션이 갈렸으면 앞 세션에 보낸 깨우기는 확인될 리가 없다. 받을 상대가
+        # 이미 없는데 게이트는 그것을 미확인으로 세고, 시한이 다 갈 때까지 다음
+        # 깨우기를 내보내지 않는다 — 새로 붙인 에이전트가 붙자마자 10분을
+        # 기다리는 이유가 이것이었다. 같은 세션을 다시 확인할 때는 건드리지
+        # 않는다. 살아 있는 깨우기를 지우면 같은 자리를 두 번 찌른다.
+        if (
+            previous is not None
+            and previous["principal_id"]
+            and previous["agent_session_id"] != candidate.agent_session_id
+        ):
+            self.connection.execute(
+                """
+                UPDATE wake_attempts SET status = 'superseded',
+                  processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE recipient_id = ? AND status = 'sent'
+                """,
+                (str(previous["principal_id"]),),
+            )
         self.connection.commit()
         return {"local_name": local_name, **candidate.public_dict()}
 
@@ -637,7 +659,9 @@ class LocalRegistry:
             UPDATE wake_attempts SET status = 'superseded',
               processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE recipient_id = ? AND status = 'sent'
-              AND sent_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+              -- 한도가 0 이면 '지금 당장 만료' 라는 뜻이다. `<` 로 두면 같은
+              -- 밀리초에 보낸 것이 안 잡혀서 그 뜻이 지켜지지 않는다.
+              AND sent_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
             """,
             (recipient_id, f"-{WAKE_CONFIRM_TTL_SECONDS} seconds"),
         )
