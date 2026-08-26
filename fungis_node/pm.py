@@ -54,6 +54,13 @@ class PMClient:
             raise PMServerError(f"server {error.code}: {detail}") from error
         except (urllib.error.URLError, json.JSONDecodeError) as error:
             raise PMServerError(str(error)) from error
+        # 시간 초과는 URLError 로 감싸이지 않고 그대로 올라온다. 여기서 안 잡으면
+        # 에이전트 화면에 파이썬 역추적이 뜬다 — 다른 실패는 전부 한 줄로
+        # 말해 주는데 이것만 속을 보여 준다.
+        except TimeoutError as error:
+            raise PMServerError(
+                f"server did not answer in 5s: {method} {path}"
+            ) from error
 
     def _raw_request(
         self, method: str, path: str, data: bytes | None = None,
@@ -72,6 +79,10 @@ class PMClient:
             raise PMServerError(f"server {error.code}: {detail}") from error
         except urllib.error.URLError as error:
             raise PMServerError(str(error)) from error
+        except TimeoutError as error:
+            raise PMServerError(
+                f"server did not answer in 8s: {method} {path}"
+            ) from error
 
     def sync_connections(self) -> list[dict[str, Any]]:
         self._request(
