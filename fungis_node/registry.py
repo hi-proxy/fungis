@@ -87,8 +87,17 @@ class LocalRegistry:
     def __init__(self, path: str | Path):
         self.connection = sqlite3.connect(str(path))
         self.connection.row_factory = sqlite3.Row
-        self.connection.executescript(SCHEMA)
+        # 이 둘은 스키마보다 **먼저** 온다. 뒤에 두면 스키마를 실행하는 동안
+        # 대기 시간이 0 이라, 그 순간 누가 쓰고 있으면 기다리지 않고 그 자리에서
+        # 깨진다. daemon 은 요청마다 이 생성자를 타므로 몰릴 때 제일 먼저
+        # 무너지는 자리가 여기였다.
+        #
+        # WAL 이 아니면 쓰기 하나가 읽기 전부를 막는다. 앱은 daemon 을 통해
+        # 화면을 그리고 에이전트도 같은 문으로 들어와서, 쓰기 한 번에 화면과
+        # 수신이 함께 선다. 서버 DB 는 이미 WAL 이다.
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.execute("PRAGMA journal_mode = WAL")
+        self.connection.executescript(SCHEMA)
         self._migrate()
 
     def close(self) -> None:
