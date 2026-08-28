@@ -1350,8 +1350,11 @@ def write_error_message(error: Exception) -> str:
     )
 
 
-def main() -> None:
-    args = parser().parse_args()
+def main(argv: list[str] | None = None) -> None:
+    # 인자를 받는다. 안 주면 종전처럼 sys.argv 를 읽으므로 실행 방식은 그대로고,
+    # 주면 명령 하나를 그 자리에서 돌려볼 수 있다 — 이게 없으면 12 개 분기 중
+    # 무엇도 테스트가 못 짚는다.
+    args = parser().parse_args(argv)
     try:
         config = load_config()
         registry = LocalRegistry(Path(config["registry"]))
