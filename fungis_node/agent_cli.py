@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .cmux import CmuxAdapter
+from .terminal import TerminalAdapter, open_terminal_adapter
 from .inbox import InboxWatcher
 from .pm import PMClient, PMServerError
 from .registry import LocalRegistry
@@ -63,7 +63,7 @@ def load_config(path: Path | None = None) -> dict:
     return value
 
 
-def current_binding(registry: LocalRegistry, adapter: CmuxAdapter) -> dict:
+def current_binding(registry: LocalRegistry, adapter: TerminalAdapter) -> dict:
     hosted_principal = os.environ.get("FUNGIS_HOSTED_PRINCIPAL_ID")
     if hosted_principal:
         binding = registry.binding_for_principal(hosted_principal)
@@ -1354,7 +1354,7 @@ def main() -> None:
     try:
         config = load_config()
         registry = LocalRegistry(Path(config["registry"]))
-        adapter = CmuxAdapter()
+        adapter = open_terminal_adapter()
         binding = current_binding(registry, adapter)
         if args.command == "init":
             client = PMClient(config["server"], registry, workspace_id=args.project)

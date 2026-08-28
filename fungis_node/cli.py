@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from .cmux import CmuxAdapter
+from .terminal import open_terminal_adapter
 from .completion import CompletionReconciler
 from .demo import DaemonLauncher, DemoLauncher, StackLauncher
 from .gate import IdleGate
@@ -149,7 +149,7 @@ def main() -> None:
             args.server = validate_server_url(args.server)
         except ValueError as error:
             argument_parser.error(str(error))
-    adapter = CmuxAdapter()
+    adapter = open_terminal_adapter()
     registry = LocalRegistry(Path(args.registry))
     if args.command == "discover":
         candidates = adapter.discover_agents(include_hidden=args.diagnostic)

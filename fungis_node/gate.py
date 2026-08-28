@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
-from .cmux import CmuxAdapter
+from .terminal import TerminalAdapter
 from .registry import LocalRegistry
 
 
@@ -27,7 +27,7 @@ class IdleGate:
     def __init__(
         self,
         registry: LocalRegistry,
-        adapter: CmuxAdapter,
+        adapter: TerminalAdapter,
         *,
         settle_seconds: float = 5.0,
         # 예약 문구를 넣고 이만큼은 다시 안 넣는다. 창에 들어간 것과 에이전트가

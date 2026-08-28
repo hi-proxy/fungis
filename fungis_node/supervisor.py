@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .cmux import CmuxAdapter
+from .terminal import TerminalAdapter
 from .completion import CompletionReconciler
 from .gate import IdleGate
 from .inbox import InboxWatcher
@@ -27,7 +27,7 @@ def iso_now() -> str:
 class NodeSupervisor:
     registry_path: Path
     server_url: str
-    cmux: CmuxAdapter
+    cmux: TerminalAdapter
     recipients: set[str] | None = None
     gate_interval: float = 2.0
     settle_seconds: float = 5.0

@@ -7,7 +7,7 @@ from typing import Any
 
 from .pm import PMClient, delivery_status
 from .tui import ConnectionController, _put
-from .cmux import CmuxAdapter
+from .terminal import TerminalAdapter
 
 
 @dataclass
@@ -330,7 +330,7 @@ def _draw_work(screen: Any, controller: PMController) -> None:
     screen.refresh()
 
 
-def run_pm_tui(client: PMClient, cmux: CmuxAdapter | None = None) -> None:
+def run_pm_tui(client: PMClient, cmux: TerminalAdapter | None = None) -> None:
     controller = PMController(
         client,
         ConnectionController(client.registry, cmux) if cmux else None,

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .cmux import CmuxAdapter
+from .terminal import TerminalAdapter, open_terminal_adapter
 from .context_detection import commit_candidates, detect_contexts
 from .git_context import inspect_git_context, is_verified_commit
 from .pm import PMClient
@@ -327,13 +327,13 @@ def create_web_app(
     registry_path: str | Path = ".fungis-node.db",
     server_url: str = "http://127.0.0.1:8787",
     *,
-    cmux: CmuxAdapter | None = None,
+    cmux: TerminalAdapter | None = None,
     sends_wakes: bool = True,
     source_roots: Iterable[Path] | None = None,
     shutdown: Callable[[], None] | None = None,
 ) -> FastAPI:
     registry_path = Path(registry_path)
-    cmux = cmux or CmuxAdapter()
+    cmux = cmux or open_terminal_adapter()
     source_roots = list(source_roots) if source_roots is not None else default_source_roots()
     shutdown = shutdown or _exit_after_response
     # 기동 시점의 소스 지문. 그 뒤 디스크가 달라지면 이 프로세스는 옛 코드로

@@ -90,3 +90,16 @@ class TerminalAdapter(Protocol):
         확신할 수 없으면 False를 준다. 사람의 타이핑이나 권한 확인과 겹치는
         것보다 한 번 더 기다리는 쪽이 낫다.
         """
+
+
+def open_terminal_adapter() -> TerminalAdapter:
+    """어느 터미널 관리자를 쓸지 **여기 한 곳에서** 정한다.
+
+    고르는 자리가 흩어져 있으면 어댑터를 하나 더 만들어도 나머지가 옛것을 직접
+    부른다. 그러면 경계가 있어도 갈아끼울 수가 없다.
+
+    지금은 cmux 하나뿐이다. tmux 나 일반 터미널이 붙을 자리가 여기다.
+    """
+    from .cmux import CmuxAdapter
+
+    return CmuxAdapter()
