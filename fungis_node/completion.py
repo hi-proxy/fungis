@@ -39,6 +39,9 @@ class CompletionReconciler:
         session_id = normalized_session_id(event)
         if session_id is None:
             return None
+        # 예약은 claim 을 안 만든다. claim 이 있을 때만 정리하면 예약은 확인될
+        # 길이 없어 간격마다 계속 나간다.
+        self.registry.clear_schedule_for_session(session_id)
         claim = self.registry.claim_for_session(session_id)
         if claim is None:
             return None

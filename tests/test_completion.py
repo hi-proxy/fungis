@@ -87,6 +87,29 @@ def test_completed_stop_acks_matching_claim_once(tmp_path, monkeypatch):
     assert calls == [(principal_id, 4)]
 
 
+def test_a_turn_confirms_a_sent_schedule_but_not_a_freshly_booked_one(tmp_path):
+    """예약은 claim 을 안 만든다 — 턴이 도는 것으로 확인한다.
+
+    claim 이 있을 때만 정리하면 예약은 확인될 길이 없어 간격마다 계속 나간다.
+    반대로 아무 턴에나 지우면, `wake --in 20m` 을 걸고 턴을 끝내는 정상 흐름에서
+    방금 건 예약이 그 자리에서 사라진다.
+    """
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach("agent-1", candidate())
+    reconciler = CompletionReconciler("http://fungis.test", registry)
+
+    # 걸어만 둔 예약. 턴이 끝나도 살아 있어야 한다.
+    registry.schedule_wake("agent-1", "2030-01-01T00:00:00.000Z")
+    reconciler.handle_event(stop_event())
+    assert registry.wake_schedule("agent-1") is not None
+
+    # 보낸 뒤라면 그 턴이 곧 확인이다.
+    registry.mark_schedule_sent("agent-1", "2030-01-01T00:00:00.000Z")
+    reconciler.handle_event(stop_event())
+    assert registry.wake_schedule("agent-1") is None
+    registry.close()
+
+
 def test_received_wrong_session_and_subagent_stop_do_not_ack(tmp_path, monkeypatch):
     registry = LocalRegistry(tmp_path / "node.db")
     registry.attach("agent-1", candidate())

@@ -564,6 +564,29 @@ class LocalRegistry:
         ).fetchone()
         return dict(row) if row else None
 
+    def clear_schedule_for_session(self, agent_session_id: str) -> int:
+        """턴이 돌았으면 그 세션에 보낸 예약은 닿은 것이다.
+
+        예약 깨우기는 읽을 인박스가 없어 claim 을 만들지 않는다. 그래서 claim 이
+        있을 때만 정리하는 길로는 예약이 영영 안 지워지고, 간격마다 다시 나간다.
+
+        **아직 안 보낸 예약은 건드리지 않는다.** 에이전트가 `wake --in 20m` 을
+        걸고 턴을 끝내는 것이 정상 흐름인데, 그 턴 종료가 방금 건 예약을 지우면
+        예약이라는 기능이 성립하지 않는다.
+        """
+        cursor = self.connection.execute(
+            """
+            DELETE FROM wake_schedule
+            WHERE sent_at IS NOT NULL AND recipient_id IN (
+              SELECT principal_id FROM bindings
+              WHERE attached = 1 AND agent_session_id = ?
+            )
+            """,
+            (agent_session_id,),
+        )
+        self.connection.commit()
+        return cursor.rowcount
+
     def clear_claim(self, recipient_id: str, through_seq: int) -> int:
         recipient_id = self.recipient_key(recipient_id)
         cursor = self.connection.execute(
