@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from .terminal import TerminalAdapter
+from .timestamps import stamp as iso_now
 from .completion import CompletionReconciler
 from .gate import IdleGate
 from .inbox import InboxWatcher
@@ -19,8 +20,6 @@ from .registry import LocalRegistry
 GATE_TICK_KEY = "gate_tick_at"
 
 
-def iso_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 @dataclass

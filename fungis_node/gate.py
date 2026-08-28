@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .terminal import TerminalAdapter
+from .timestamps import stamp
 from .registry import LocalRegistry
 
 
@@ -219,7 +220,7 @@ class IdleGate:
             binding = self.registry.binding(recipient_id)
             assert binding is not None
             self.adapter.wake(binding["surface_id"], decision.would_send or "")
-            now = self.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            now = stamp(self.now())
             # 세는 데만 쓴다. 판정은 위에서 이미 끝났다.
             self.registry.log_wake(
                 recipient_id,

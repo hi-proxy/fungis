@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .terminal import TerminalAdapter, open_terminal_adapter
+from .timestamps import stamp
 from .inbox import InboxWatcher
 from .pm import PMClient, PMServerError
 from .registry import LocalRegistry
@@ -1528,7 +1529,7 @@ def main() -> None:
                 due = datetime.now(timezone.utc) + timedelta(seconds=seconds)
                 booked = registry.schedule_wake(
                     me,
-                    due.strftime("%Y-%m-%dT%H:%M:%S.") + f"{due.microsecond // 1000:03d}Z",
+                    stamp(due),
                     args.note,
                 )
                 deferrals = int(booked.get("deferrals") or 1)

@@ -11,12 +11,8 @@ from threading import Event
 from websockets.sync.client import connect
 
 from .registry import LocalRegistry
+from .timestamps import stamp as _stamp
 from .server_url import validate_server_url
-
-
-def _stamp() -> str:
-    """UTC 시각 도장. 노드가 남기는 시각은 전부 이 모양이다."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class ServerError(RuntimeError):

@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .terminal import TerminalAdapter, open_terminal_adapter
+from .timestamps import stamp
 from .context_detection import commit_candidates, detect_contexts
 from .git_context import inspect_git_context, is_verified_commit
 from .pm import PMClient
@@ -531,9 +532,9 @@ def create_web_app(
         """깨우기가 얼마나 닿았나. 판정에는 안 쓰고 보는 데만 쓴다."""
         registry = LocalRegistry(registry_path)
         try:
-            since = (
+            since = stamp(
                 datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 720)))
-            ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            )
             return {"since": since, "kinds": registry.wake_stats(since)}
         finally:
             registry.close()
