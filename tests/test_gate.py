@@ -302,6 +302,36 @@ def test_unconfirmed_wake_does_not_deafen_forever(tmp_path, monkeypatch):
     registry.close()
 
 
+def test_a_long_turn_is_not_woken_again_for_what_it_already_took(tmp_path):
+    """`pending_events` 는 확인이 와야 지워지고, 확인은 턴이 끝나야 온다.
+
+    그 사이 게이트가 그것만 보면 같은 메시지로 한 턴 내내 깨운다 — 긴 턴일수록
+    심하다. 2026-08-28 밤에 터미널이 그렇게 도배됐다.
+    """
+    registry = LocalRegistry(tmp_path / "node.db")
+    current = candidate("idle")
+    registry.attach("agent-1", current)
+    record_pending(registry)
+
+    cmux = GateCmux(current, prompt_ready=True)
+    gate = IdleGate(registry, cmux, settle_seconds=0)
+    assert gate.run("agent-1", send=True).eligible is True
+
+    # 읽어 갔다. 확인은 아직 안 왔고 pending 도 그대로다.
+    registry.claim_inbox("agent-1", 4, "session-1")
+    assert gate.run("agent-1", send=True).reason == "claimed"
+    assert len(cmux.wakes) == 1
+
+    # 새로 온 것은 넘겨준 구간 밖이라 다시 깨운다.
+    registry.record_event({
+        "event_id": "event-2", "event_seq": 2, "recipient_id": "agent-1",
+        "through_seq": 9, "kind": "inbox_available",
+    })
+    assert gate.run("agent-1", send=True).eligible is True
+    assert len(cmux.wakes) == 2
+    registry.close()
+
+
 def test_an_idle_screen_is_woken_even_with_a_wake_unconfirmed(tmp_path):
     """찌를 자리가 비어 있으면 두 번 찌르는 것이 아니다.
 

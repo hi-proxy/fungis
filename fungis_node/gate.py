@@ -101,6 +101,21 @@ class IdleGate:
         waking = pending["waking_count"]
         if waking == 0 and booked is None:
             return GateDecision(eligible=False, reason="no_pending", **common)
+        # 이미 넘겨준 것을 또 깨우지 않는다.
+        #
+        # `pending_events` 는 확인이 와야 지워진다. 확인은 턴이 끝나야 오므로,
+        # 읽고 나서 일하는 동안 그 줄이 그대로 남는다. 게이트가 그것만 보면
+        # **한 턴 내내 같은 메시지로 계속 깨운다** — 긴 턴일수록 심하다.
+        #
+        # claim 은 '여기까지 넘겨줬다' 는 표시라 그 구간을 정확히 가린다. 새
+        # 메시지가 오면 pending 이 그보다 커져서 다시 깨운다.
+        claim = self.registry.claim(recipient_id)
+        if (
+            booked is None
+            and claim is not None
+            and int(claim["through_seq"]) >= pending["through_seq"]
+        ):
+            return GateDecision(eligible=False, reason="claimed", **common)
         # idle만 믿고 나머지는 전부 화면이 판단한다. 한 턴도 안 돈 새 세션의
         # lifecycle은 믿을 수 없다 — cmux가 unknown으로 적기도 하고 running에
         # 머물기도 한다(8/16 tester1은 unknown, tester2는 running이었고 둘 다
