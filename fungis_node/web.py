@@ -27,6 +27,7 @@ from .git_context import inspect_git_context, is_verified_commit
 from .pm import PMClient
 from .registry import LocalRegistry
 from .routes_board import register_board_routes
+from .routes_projects import register_project_routes
 from .routes_roles import register_role_routes
 from .supervisor import GATE_TICK_KEY
 from .tui import ConnectionController
@@ -266,10 +267,6 @@ class NicknamePayload(BaseModel):
     nickname: str = Field(max_length=80)
 
 
-class ProjectPayload(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-
-
 class PMProfilePayload(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
 
@@ -277,10 +274,6 @@ class PMProfilePayload(BaseModel):
 class AnswerPayload(BaseModel):
     project_id: str
     text: str = Field(min_length=1, max_length=2000)
-
-
-class RepositoryPayload(BaseModel):
-    path: str = Field(min_length=1, max_length=4096)
 
 
 class BookmarkPayload(BaseModel):
@@ -870,61 +863,6 @@ def create_web_app(
         except Exception as error:
             raise fail(error) from error
 
-    @app.get("/api/projects")
-    def projects() -> list[dict]:
-        try:
-            with client() as pm:
-                pm.sync_connections()
-                return pm.projects()
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.post("/api/projects", status_code=201)
-    def create_project(payload: ProjectPayload) -> dict:
-        try:
-            with client() as pm:
-                return pm.create_project(payload.name.strip())
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.patch("/api/projects/{project_id}")
-    def update_project(project_id: str, payload: ProjectPayload) -> dict:
-        try:
-            with client() as pm:
-                return pm.update_project(project_id, payload.name.strip())
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.delete("/api/projects/{project_id}")
-    def archive_project(project_id: str) -> dict:
-        try:
-            with client() as pm:
-                return pm.archive_project(project_id)
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.put("/api/projects/{project_id}/repository")
-    def set_project_repository(project_id: str, payload: RepositoryPayload) -> dict:
-        try:
-            with client() as pm:
-                if project_id not in {str(item["id"]) for item in pm.projects()}:
-                    raise LookupError("project not found")
-                git = inspect_git_context(payload.path)
-                if git is None:
-                    raise ValueError("selected folder is not inside a Git worktree")
-                stored = pm.registry.set_project_repository(project_id, git["repo_root"])
-                return {**stored, "git": git}
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.delete("/api/projects/{project_id}/repository", status_code=204)
-    def delete_project_repository(project_id: str) -> None:
-        registry = LocalRegistry(registry_path)
-        try:
-            if not registry.delete_project_repository(project_id):
-                raise HTTPException(status_code=404, detail="project repository not set")
-        finally:
-            registry.close()
 
     @app.patch("/api/pm-profile")
     def update_pm_profile(payload: PMProfilePayload) -> dict:
@@ -1011,6 +949,7 @@ def create_web_app(
     # 어느 라우터가 실제로 얹혔는지 읽어서 알 수 없다.
     register_board_routes(app, client, fail)
     register_role_routes(app, client, fail)
+    register_project_routes(app, client, fail, registry_path)
     return app
 
 
