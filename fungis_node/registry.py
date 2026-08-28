@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS wake_schedule (
     recipient_id TEXT PRIMARY KEY,
     due_at TEXT NOT NULL,
     note TEXT,
+    -- 보낸 시각. 예전에는 보내는 순간 이 줄을 지웠고, 그래서 문구가 창에 들어간
+    -- 뒤 에이전트가 그것을 못 보고 지나가면 예약이 조용히 사라졌다. 재시도가
+    -- 없다는 뜻이고, 상주 에이전트는 이 예약 사슬로 산다.
+    sent_at TEXT,
     -- 진전 없이 반복해서 미루는 것은 그 자체가 막힘 신호다. 세어 두지 않으면
     -- 미루기만 하다 조용히 죽는 것을 밖에서 볼 방법이 없다.
     deferrals INTEGER NOT NULL DEFAULT 1,
@@ -169,6 +173,14 @@ class LocalRegistry:
             self.connection.execute(
                 "ALTER TABLE wake_attempts"
                 " ADD COLUMN stalled_count INTEGER NOT NULL DEFAULT 0"
+            )
+        schedule_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(wake_schedule)")
+        }
+        if "sent_at" not in schedule_columns:
+            self.connection.execute(
+                "ALTER TABLE wake_schedule ADD COLUMN sent_at TEXT"
             )
         self._ensure_identity()
 
@@ -735,6 +747,21 @@ class LocalRegistry:
         self.connection.execute(
             "DELETE FROM wake_schedule WHERE recipient_id = ?",
             (self.recipient_key(recipient_id),),
+        )
+        self.connection.commit()
+
+    def mark_schedule_sent(self, recipient_id: str, when: str) -> None:
+        """예약 문구를 창에 넣었다. **지우지는 않는다.**
+
+        지우면 재시도가 없어진다 — 문구가 들어간 것과 에이전트가 그것을 본 것은
+        다른 일이다. 확인은 턴이 도는 것으로 하고, 그때 `clear_wake_schedule` 이
+        지운다.
+        """
+        # 시각은 부르는 쪽이 준다. 게이트는 주입된 시계로 판정하는데 여기서
+        # DB 의 `now` 를 쓰면 두 시계가 섞여, 재발송 간격이 그 차이만큼 어긋난다.
+        self.connection.execute(
+            "UPDATE wake_schedule SET sent_at = ? WHERE recipient_id = ?",
+            (when, self.recipient_key(recipient_id)),
         )
         self.connection.commit()
 

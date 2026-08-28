@@ -537,8 +537,19 @@ def test_a_worker_can_book_its_own_next_step(tmp_path):
     assert decision.eligible and decision.reason == "scheduled"
     assert screen.wakes == [gate.due_text]
 
-    # 소진된다. 한 번 예약으로 계속 깨우면 그게 소음이다.
-    assert registry.wake_schedule("agent-1") is None
+    # 보냈다고 지우지 않는다. 문구가 창에 들어간 것과 에이전트가 그것을 본 것은
+    # 다른 일이라, 지우면 못 본 예약이 조용히 사라진다 — 재시도가 없다는 뜻이고
+    # 상주 에이전트는 이 사슬로 산다.
+    booked = registry.wake_schedule("agent-1")
+    assert booked is not None and booked["sent_at"]
+
+    # 그렇다고 계속 보내면 그건 도배다. 한 번 넣은 뒤로는 간격을 둔다.
+    assert gate.evaluate("agent-1", refresh=False).reason == "schedule_sent"
+    assert screen.wakes == [gate.due_text]
+
+    # 간격이 지나면 다시 보낸다. 못 본 예약이 여기서 되살아난다.
+    gate.now = lambda: now + timedelta(seconds=gate.resend_seconds + 1)
+    assert gate.evaluate("agent-1", refresh=False).reason == "scheduled"
     registry.close()
 
 

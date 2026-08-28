@@ -30,6 +30,9 @@ class IdleGate:
         adapter: CmuxAdapter,
         *,
         settle_seconds: float = 5.0,
+        # 예약 문구를 넣고 이만큼은 다시 안 넣는다. 창에 들어간 것과 에이전트가
+        # 본 것은 다른 일이라 재시도가 필요한데, 간격이 없으면 2초마다 도배가 된다.
+        resend_seconds: float = 120.0,
         now: Callable[[], datetime] | None = None,
         wake_text: str = "[fungis] inbox",
         due_text: str = "[fungis] 예약한 시각이다 — 하던 걸음을 이어간다",
@@ -37,6 +40,7 @@ class IdleGate:
         self.registry = registry
         self.adapter = adapter
         self.settle_seconds = settle_seconds
+        self.resend_seconds = resend_seconds
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.wake_text = wake_text
         # 인박스 깨우기와 문구를 나눈다. 받는 쪽이 왜 깨어났는지 알아야
@@ -185,10 +189,15 @@ class IdleGate:
         보고도 인박스를 안 돈 창은 지금 놀고 있고, 그런 창을 한도가 다 갈 때까지
         재워 두면 가만히 있는데 수신만 끊긴다.
 
-        예약은 아직 이 층을 안 탄다. `wake_attempts` 가 인박스 확인 추적 전용이라
-        예약을 넣으면 영영 미확인으로 남아 인박스 쪽을 막는다.
+        예약은 제 줄(`wake_schedule.sent_at`)로 잰다. `wake_attempts` 는 인박스
+        확인 추적 전용이라, 예약을 거기 넣으면 영영 미확인으로 남아 인박스 쪽을
+        막는다 — 그래서 예약이 이 층을 통째로 건너뛰고 있었다.
         """
         if errand == "scheduled":
+            booked = self.registry.wake_schedule(recipient_id)
+            sent_at = (booked or {}).get("sent_at")
+            if sent_at and self._elapsed_seconds(str(sent_at)) < self.resend_seconds:
+                return "schedule_sent"
             return None
         if self.registry.outstanding_wake(
             recipient_id
@@ -207,11 +216,19 @@ class IdleGate:
             # 예약으로 깨운 것은 확인을 기다릴 것이 없다. 읽을 인박스가 없으니
             # ACK 할 대상도 없고, wake_attempts 에 남기면 그 뒤 인박스 깨우기가
             # 확인 안 됨으로 막힌다.
-            if decision.reason != "scheduled":
+            if decision.reason == "scheduled":
+                # 보냈다고 지우지 않는다. 문구가 창에 들어간 것과 에이전트가
+                # 그것을 본 것은 다른 일이라, 지우면 못 본 예약이 조용히
+                # 사라진다. 턴이 돌면 그때 확인된 것으로 보고 지운다.
+                self.registry.mark_schedule_sent(
+                    recipient_id,
+                    self.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+                )
+            else:
                 self.registry.record_wake(recipient_id, decision.through_seq)
-            # 어떤 이유로 깨웠든 예약은 소진된다. 인박스로 이미 턴이 열렸는데
-            # 예약이 남아 있으면 곧바로 한 번 더 찌른다.
-            self.registry.clear_wake_schedule(recipient_id)
+                # 인박스로 턴이 열렸으면 예약도 함께 소진된다. 남겨 두면 열린
+                # 턴을 곧바로 한 번 더 찌른다.
+                self.registry.clear_wake_schedule(recipient_id)
         return decision
 
     def _elapsed_seconds(self, timestamp: str) -> float:
