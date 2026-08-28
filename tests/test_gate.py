@@ -351,12 +351,15 @@ def test_a_long_turn_is_not_woken_again_for_what_it_already_took(tmp_path):
     registry.close()
 
 
-def test_an_idle_screen_is_woken_even_with_a_wake_unconfirmed(tmp_path):
-    """찌를 자리가 비어 있으면 두 번 찌르는 것이 아니다.
+def test_a_wake_waits_out_its_hold_but_a_new_message_does_not(tmp_path, monkeypatch):
+    """3층은 **같은 것**만 막는다.
 
-    앞의 깨우기를 못 봤거나 보고도 인박스를 안 돈 창은 지금 놀고 있다. 그런
-    창을 한도가 다 갈 때까지 재워 두면, 가만히 있는데 수신만 끊긴다.
+    화면이 비었는지는 2층에서 이미 봤다. 여기서 또 보면 화면이 빈 동안 절제가
+    통째로 사라져서 읽기 전까지 주기마다 나간다 — 실측에서 24초 사이에 두 번
+    나갔다. 반대로 새 메시지까지 막으면 새로 온 말이 한도만큼 늦는다.
     """
+    from fungis_node import registry as registry_module
+
     registry = LocalRegistry(tmp_path / "node.db")
     current = candidate("idle")
     registry.attach("agent-1", current)
@@ -365,9 +368,22 @@ def test_an_idle_screen_is_woken_even_with_a_wake_unconfirmed(tmp_path):
     cmux = GateCmux(current, prompt_ready=True)
     gate = IdleGate(registry, cmux, settle_seconds=0)
     assert gate.run("agent-1", send=True).eligible is True
-    # 확인이 안 왔지만 화면이 비었다. 한도를 기다릴 이유가 없다.
+
+    # 같은 것은 한도가 지나기 전까지 다시 안 나간다. 화면이 비어 있어도.
+    assert gate.run("agent-1", send=True).reason == "wake_unconfirmed"
+    assert len(cmux.wakes) == 1
+
+    # 새로 온 것은 다른 용건이라 기다리지 않는다.
+    registry.record_event({
+        "event_id": "event-2", "event_seq": 2, "recipient_id": "agent-1",
+        "through_seq": 9, "kind": "inbox_available",
+    })
     assert gate.run("agent-1", send=True).eligible is True
     assert len(cmux.wakes) == 2
+
+    # 한도가 지나면 못 본 것도 다시 나간다. 갇히지 않는다.
+    monkeypatch.setattr(registry_module, "WAKE_CONFIRM_TTL_SECONDS", 0)
+    assert gate.run("agent-1", send=True).eligible is True
     registry.close()
 
 

@@ -112,7 +112,7 @@ class IdleGate:
         if blocked is not None:
             return GateDecision(eligible=False, reason=blocked, **common)
 
-        blocked = self._may_send_now(recipient_id, binding, errand)
+        blocked = self._may_send_now(recipient_id, errand, pending["through_seq"])
         if blocked is not None:
             return GateDecision(eligible=False, reason=blocked, **common)
 
@@ -181,7 +181,7 @@ class IdleGate:
 
     # 3층 — 지금 보내도 되나
     def _may_send_now(
-        self, recipient_id: str, binding: dict, errand: str
+        self, recipient_id: str, errand: str, through_seq: int
     ) -> str | None:
         """같은 자리를 연달아 찌르지 않는다.
 
@@ -199,9 +199,15 @@ class IdleGate:
             if sent_at and self._elapsed_seconds(str(sent_at)) < self.resend_seconds:
                 return "schedule_sent"
             return None
-        if self.registry.outstanding_wake(
-            recipient_id
-        ) is not None and not self.adapter.prompt_ready(binding["surface_id"]):
+        # 화면은 여기서 안 본다. **그것은 2층 질문이고 이미 지나왔다.**
+        #
+        # 섞어 두면 화면이 빈 동안 절제가 통째로 사라져서, 읽기 전까지 게이트
+        # 주기마다 계속 나간다 — 실제로 24초 사이에 두 번 나갔다. 갇히는 것을
+        # 막는 일은 짧아진 한도(45초)가 한다.
+        # **같은 것**만 막는다. 새 메시지는 다른 용건이라 기다릴 이유가 없다 —
+        # 여기서 한도를 걸면 새로 온 말이 그 시간만큼 늦는다.
+        outstanding = self.registry.outstanding_wake(recipient_id)
+        if outstanding is not None and int(outstanding["through_seq"]) >= through_seq:
             return "wake_unconfirmed"
         return None
 
