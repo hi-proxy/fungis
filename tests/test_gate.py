@@ -753,3 +753,28 @@ def test_a_later_message_waits_in_the_inbox_without_opening_a_turn(tmp_path):
     assert gate.run("agent-1", send=True, refresh=False).reason == "eligible"
     assert screen.wakes == [gate.wake_text]
     registry.close()
+
+
+def test_wake_log_counts_what_arrived(tmp_path):
+    """이력이 없으면 고친 뒤 나아졌는지 말할 수가 없다.
+
+    `wake_attempts` 는 에이전트당 한 행이라 다음 깨우기가 덮어쓴다. 2026-08-28 에
+    다섯 번 고치고도 전후를 숫자로 못 댄 이유가 그것이다.
+    """
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach("agent-1", candidate("idle"))
+
+    registry.log_wake("agent-1", "eligible", 4, "2026-08-29T00:00:00.000Z")
+    registry.close_wake_log("agent-1", "read_at", "2026-08-29T00:00:03.000Z")
+    registry.close_wake_log("agent-1", "settled_at", "2026-08-29T00:00:09.000Z")
+    # 나갔지만 아무도 안 읽은 것. 수신율은 이것 때문에 100 이 아니게 된다.
+    registry.log_wake("agent-1", "eligible", 5, "2026-08-29T00:01:00.000Z")
+    registry.log_wake("agent-1", "scheduled", None, "2026-08-29T00:02:00.000Z")
+
+    stats = {row["kind"]: row for row in registry.wake_stats("2026-08-29T00:00:00.000Z")}
+    assert stats["eligible"]["sent"] == 2
+    assert stats["eligible"]["read"] == 1
+    assert stats["eligible"]["avg_read_seconds"] == 3
+    assert stats["scheduled"]["sent"] == 1
+    assert stats["scheduled"]["read"] == 0
+    registry.close()

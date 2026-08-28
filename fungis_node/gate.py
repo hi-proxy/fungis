@@ -213,6 +213,14 @@ class IdleGate:
             binding = self.registry.binding(recipient_id)
             assert binding is not None
             self.adapter.wake(binding["surface_id"], decision.would_send or "")
+            now = self.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            # 세는 데만 쓴다. 판정은 위에서 이미 끝났다.
+            self.registry.log_wake(
+                recipient_id,
+                decision.reason,
+                None if decision.reason == "scheduled" else decision.through_seq,
+                now,
+            )
             # 예약으로 깨운 것은 확인을 기다릴 것이 없다. 읽을 인박스가 없으니
             # ACK 할 대상도 없고, wake_attempts 에 남기면 그 뒤 인박스 깨우기가
             # 확인 안 됨으로 막힌다.
@@ -220,10 +228,7 @@ class IdleGate:
                 # 보냈다고 지우지 않는다. 문구가 창에 들어간 것과 에이전트가
                 # 그것을 본 것은 다른 일이라, 지우면 못 본 예약이 조용히
                 # 사라진다. 턴이 돌면 그때 확인된 것으로 보고 지운다.
-                self.registry.mark_schedule_sent(
-                    recipient_id,
-                    self.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-                )
+                self.registry.mark_schedule_sent(recipient_id, now)
             else:
                 self.registry.record_wake(recipient_id, decision.through_seq)
                 # 인박스로 턴이 열렸으면 예약도 함께 소진된다. 남겨 두면 열린

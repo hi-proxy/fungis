@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -11,6 +12,11 @@ from websockets.sync.client import connect
 
 from .registry import LocalRegistry
 from .server_url import validate_server_url
+
+
+def _stamp() -> str:
+    """UTC 시각 도장. 노드가 남기는 시각은 전부 이 모양이다."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class ServerError(RuntimeError):
@@ -71,6 +77,9 @@ class InboxWatcher:
         )
         assert isinstance(messages, list)
         if messages:
+            self.registry.close_wake_log(
+                self.recipient_id, "read_at", _stamp()
+            )
             self.registry.claim_inbox(
                 self.recipient_id,
                 max(int(message["seq"]) for message in messages),
@@ -119,6 +128,7 @@ class InboxWatcher:
         self.registry.clear_processed(self.recipient_id, through_seq)
         self.registry.mark_wake_processed(self.recipient_id, through_seq)
         self.registry.clear_claim(self.recipient_id, through_seq)
+        self.registry.close_wake_log(self.recipient_id, "settled_at", _stamp())
         return state
 
     def reconcile_state(self) -> dict:

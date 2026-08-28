@@ -90,6 +90,27 @@ CREATE TABLE IF NOT EXISTS wake_schedule (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- 깨우기 한 줄씩. `wake_attempts` 는 에이전트당 한 행이라 다음 깨우기가
+-- 덮어쓰고, 그래서 '몇 번 깨웠고 몇 번 읽혔나' 가 안 남는다. 그 숫자 없이는
+-- 게이트를 고쳐도 나아졌는지 말할 수가 없다 — 2026-08-28 에 다섯 번 고치고도
+-- 전후를 못 댔다.
+CREATE TABLE IF NOT EXISTS wake_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient_id TEXT NOT NULL,
+    -- inbox 인가 scheduled 인가. 둘은 다른 이유로 나가고 다른 식으로 확인된다.
+    kind TEXT NOT NULL,
+    through_seq INTEGER,
+    sent_at TEXT NOT NULL,
+    -- 읽어 간 시각. 확인된 시각과 다르다 — 확인은 정리로도 찍히지만 이것은
+    -- 에이전트가 실제로 인박스를 연 순간이다.
+    read_at TEXT,
+    settled_at TEXT,
+    settled_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS wake_log_recipient_sent
+    ON wake_log(recipient_id, sent_at);
+
 CREATE TABLE IF NOT EXISTS project_repositories (
     project_id TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -794,6 +815,57 @@ class LocalRegistry:
             (when, self.recipient_key(recipient_id)),
         )
         self.connection.commit()
+
+    def log_wake(
+        self, recipient_id: str, kind: str, through_seq: int | None, when: str
+    ) -> None:
+        """나간 깨우기를 한 줄 남긴다. 판정에는 안 쓴다 — 세는 데만 쓴다."""
+        self.connection.execute(
+            "INSERT INTO wake_log(recipient_id, kind, through_seq, sent_at)"
+            " VALUES (?, ?, ?, ?)",
+            (self.recipient_key(recipient_id), kind, through_seq, when),
+        )
+        self.connection.commit()
+
+    def close_wake_log(self, recipient_id: str, column: str, when: str) -> None:
+        """아직 안 닫힌 줄에 시각을 찍는다.
+
+        `column` 은 `read_at` 또는 `settled_at` 이다. 부르는 자리가 고정이라
+        문자열을 그대로 끼워 넣되, 그 둘만 받는다.
+        """
+        if column not in ("read_at", "settled_at"):
+            raise ValueError(f"unknown column: {column}")
+        self.connection.execute(
+            f"UPDATE wake_log SET {column} = ?"
+            f" WHERE recipient_id = ? AND {column} IS NULL",
+            (when, self.recipient_key(recipient_id)),
+        )
+        self.connection.commit()
+
+    def wake_stats(self, since: str) -> list[dict[str, Any]]:
+        """깨우기가 얼마나 닿았나. `since` 이후로 센다.
+
+        고친 뒤 나아졌는지를 말하려면 이 숫자가 있어야 한다. 2026-08-28 에는
+        다섯 번 고치고도 전후를 못 댔다.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT kind,
+                   COUNT(*) AS sent,
+                   SUM(read_at IS NOT NULL) AS read,
+                   SUM(settled_at IS NOT NULL) AS settled,
+                   -- CAST 만 쓰면 자른다. julianday 차이는 부동소수라 3 초가
+                   -- 2.9999 로 나오고, 그대로 잘리면 지연을 늘 짧게 보고한다.
+                   CAST(ROUND(AVG(
+                     CASE WHEN read_at IS NOT NULL
+                     THEN (julianday(read_at) - julianday(sent_at)) * 86400 END
+                   )) AS INTEGER) AS avg_read_seconds
+            FROM wake_log WHERE sent_at >= ?
+            GROUP BY kind ORDER BY kind
+            """,
+            (since,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def record_wake(self, recipient_id: str, through_seq: int) -> None:
         recipient_id = self.recipient_key(recipient_id)
