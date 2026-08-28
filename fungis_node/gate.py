@@ -93,73 +93,108 @@ class IdleGate:
             through_seq=pending["through_seq"],
             settle_remaining_seconds=round(remaining, 3),
         )
-        # 보낼 말은 없지만 본인이 이 시각에 깨워 달라고 했을 수 있다. 그게
-        # 없으면 착수만 선언하고 턴이 끝난 worker 는 아무도 말을 걸 때까지 선다.
-        booked = self._schedule_due(recipient_id)
+        # 판정은 세 층이다. 층을 섞으면 무엇을 보고 무엇을 안 보는지가 흐려지고,
+        # 2026-08-28 에 그렇게 두 번 깨졌다 — 한 번은 화면을 안 봐서 수신이
+        # 끊겼고, 한 번은 claim 을 안 봐서 2초마다 도배했다.
+        #
+        #   1층  무엇을 보낼까      보낼 것이 없으면 여기서 끝난다
+        #   2층  보낼 수 있나       받는 쪽 상태
+        #   3층  지금 보내도 되나   보내는 쪽 절제
+        errand, blocked = self._what_to_send(recipient_id, pending)
+        if errand is None:
+            return GateDecision(eligible=False, reason=blocked, **common)
+
+        blocked = self._can_receive(binding, lifecycle, remaining)
+        if blocked is not None:
+            return GateDecision(eligible=False, reason=blocked, **common)
+
+        blocked = self._may_send_now(recipient_id, binding, errand)
+        if blocked is not None:
+            return GateDecision(eligible=False, reason=blocked, **common)
+
+        return GateDecision(
+            eligible=True,
+            reason=errand,
+            would_send=(
+                self.due_text if errand == "scheduled" else self.wake_text
+            ),
+            **common,
+        )
+
+    # 1층 — 무엇을 보낼까
+    def _what_to_send(
+        self, recipient_id: str, pending: dict
+    ) -> tuple[str | None, str]:
+        """보낼 것을 고른다. **여기서 보내지는 않는다.**
+
+        고르는 것과 보내는 것을 한 자리에서 하면 아래 층을 건너뛰게 된다.
+        예약이 그랬다 — 절제도 재시도도 못 받았다.
+        """
         # 쌓인 것이 아니라 깨울 이유가 있는 것을 센다. later 로 온 것은
         # 인박스에 있되 턴을 열지 않는다.
         waking = pending["waking_count"]
+        # 보낼 말은 없지만 본인이 이 시각에 깨워 달라고 했을 수 있다. 그게
+        # 없으면 착수만 선언하고 턴이 끝난 worker 는 아무도 말을 걸 때까지 선다.
+        booked = self._schedule_due(recipient_id)
         if waking == 0 and booked is None:
-            return GateDecision(eligible=False, reason="no_pending", **common)
-        # 이미 넘겨준 것을 또 깨우지 않는다.
+            return None, "no_pending"
+        if waking == 0:
+            return "scheduled", ""
+        # 이미 넘겨준 것을 또 깨우지 않는다. `pending_events` 는 확인이 와야
+        # 지워지고 확인은 턴이 끝나야 오므로, 읽고 일하는 동안 그 줄이 그대로
+        # 남는다. claim 이 '여기까지 넘겨줬다' 를 말해 그 구간을 가린다.
         #
-        # `pending_events` 는 확인이 와야 지워진다. 확인은 턴이 끝나야 오므로,
-        # 읽고 나서 일하는 동안 그 줄이 그대로 남는다. 게이트가 그것만 보면
-        # **한 턴 내내 같은 메시지로 계속 깨운다** — 긴 턴일수록 심하다.
-        #
-        # claim 은 '여기까지 넘겨줬다' 는 표시라 그 구간을 정확히 가린다. 새
-        # 메시지가 오면 pending 이 그보다 커져서 다시 깨운다.
+        # 예약이 함께 걸려 있으면 넘어간다. 그것은 인박스와 다른 이유로 깨우는
+        # 것이라, 넘겨준 인박스 구간이 예약까지 덮으면 안 된다.
         claim = self.registry.claim(recipient_id)
         if (
             booked is None
             and claim is not None
             and int(claim["through_seq"]) >= pending["through_seq"]
         ):
-            return GateDecision(eligible=False, reason="claimed", **common)
-        # idle만 믿고 나머지는 전부 화면이 판단한다. 한 턴도 안 돈 새 세션의
-        # lifecycle은 믿을 수 없다 — cmux가 unknown으로 적기도 하고 running에
-        # 머물기도 한다(8/16 tester1은 unknown, tester2는 running이었고 둘 다
-        # 화면은 빈 프롬프트였다). lifecycle만 보면 갓 배정한 에이전트는 첫
-        # 메시지를 영원히 못 받고, 사람이 터미널을 건드려 줘야만 풀린다.
-        #
-        # 화면으로 내려도 안전하다. 진짜로 일하는 중이면 빈 프롬프트가 없어서
-        # 어차피 못 깨운다. 여기까지 왔다는 건 보낼 것이 있다는 뜻이라
-        # read-screen 호출도 대기 중일 때만 일어난다.
+            return None, "claimed"
+        return "eligible", ""
+
+    # 2층 — 보낼 수 있나
+    def _can_receive(
+        self, binding: dict, lifecycle: str, remaining: float
+    ) -> str | None:
+        """받는 쪽이 지금 받을 수 있는 상태인가.
+
+        idle 만 믿고 나머지는 화면이 판단한다. 한 턴도 안 돈 새 세션의
+        lifecycle 은 믿을 수 없다 — cmux 가 unknown 으로 적기도 하고 running 에
+        머물기도 한다(8/16 tester1 은 unknown, tester2 는 running 이었고 둘 다
+        화면은 빈 프롬프트였다). lifecycle 만 보면 갓 배정한 에이전트는 첫
+        메시지를 영원히 못 받는다.
+        """
         if lifecycle != "idle" and not self.adapter.prompt_ready(
             binding["surface_id"]
         ):
-            return GateDecision(
-                eligible=False, reason=f"lifecycle_{lifecycle}", **common
-            )
+            return f"lifecycle_{lifecycle}"
         if remaining > 0:
-            return GateDecision(eligible=False, reason="settling", **common)
-        # 예약은 보낼 말이 없어도 깨우는 것이라 확인 대기와 무관하다. 인박스
-        # 쪽만 그 검사를 탄다 — 예약을 여기서 막으면 앞선 인박스 깨우기 하나가
-        # 그 뒤 모든 예약을 세워 버린다.
-        if waking == 0:
-            return GateDecision(
-                eligible=True, reason="scheduled",
-                would_send=self.due_text, **common,
-            )
-        # 같은 자리를 두 번 찌르지 않으려는 규칙이다. 그런데 **찌를 자리가
-        # 비어 있으면 두 번이 아니다** — 앞의 깨우기를 못 봤거나 보고도 인박스를
-        # 안 돈 창은 지금 놀고 있고, 그런 창은 한도가 다 갈 때까지 아무 말도
-        # 못 듣는다. 가만히 있는데 수신이 끊기는 것이 그래서였다.
-        #
-        # 화면을 여기서 직접 본다. 위쪽 검사는 lifecycle 이 idle 이면 화면을
-        # 건너뛰는데, 그 값은 cmux 가 적는 것이라 믿고 넘길 수 없다.
+            return "settling"
+        return None
+
+    # 3층 — 지금 보내도 되나
+    def _may_send_now(
+        self, recipient_id: str, binding: dict, errand: str
+    ) -> str | None:
+        """같은 자리를 연달아 찌르지 않는다.
+
+        **찌를 자리가 비어 있으면 두 번이 아니다** — 앞의 깨우기를 못 봤거나
+        보고도 인박스를 안 돈 창은 지금 놀고 있고, 그런 창을 한도가 다 갈 때까지
+        재워 두면 가만히 있는데 수신만 끊긴다.
+
+        예약은 아직 이 층을 안 탄다. `wake_attempts` 가 인박스 확인 추적 전용이라
+        예약을 넣으면 영영 미확인으로 남아 인박스 쪽을 막는다.
+        """
+        if errand == "scheduled":
+            return None
         if self.registry.outstanding_wake(
             recipient_id
         ) is not None and not self.adapter.prompt_ready(binding["surface_id"]):
-            return GateDecision(
-                eligible=False, reason="wake_unconfirmed", **common
-            )
-        return GateDecision(
-            eligible=True,
-            reason="eligible",
-            would_send=self.wake_text,
-            **common,
-        )
+            return "wake_unconfirmed"
+        return None
 
     def run(
         self, recipient_id: str, *, send: bool = False, refresh: bool = True

@@ -302,6 +302,25 @@ def test_unconfirmed_wake_does_not_deafen_forever(tmp_path, monkeypatch):
     registry.close()
 
 
+def test_a_due_schedule_wakes_even_when_the_inbox_was_already_handed_over(tmp_path):
+    """예약은 인박스와 다른 이유로 깨운다.
+
+    넘겨준 인박스 구간이 예약까지 덮으면, 본인이 이 시각에 깨워 달라고 한 것이
+    조용히 사라진다. 상주 에이전트는 그 예약으로 산다.
+    """
+    registry = LocalRegistry(tmp_path / "node.db")
+    current = candidate("idle")
+    registry.attach("agent-1", current)
+    record_pending(registry)
+    registry.claim_inbox("agent-1", 4, "session-1")
+    registry.schedule_wake("agent-1", "2000-01-01T00:00:00.000Z")
+
+    cmux = GateCmux(current, prompt_ready=True)
+    gate = IdleGate(registry, cmux, settle_seconds=0)
+    assert gate.run("agent-1", send=True).eligible is True
+    registry.close()
+
+
 def test_a_long_turn_is_not_woken_again_for_what_it_already_took(tmp_path):
     """`pending_events` 는 확인이 와야 지워지고, 확인은 턴이 끝나야 온다.
 
