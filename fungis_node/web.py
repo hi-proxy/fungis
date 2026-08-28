@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.parse
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Literal
 
@@ -525,6 +525,18 @@ def create_web_app(
         return {"status": "shutting-down"}
 
     app.mount("/assets", StaticFiles(directory=ASSETS), name="assets")
+
+    @app.get("/api/wake-stats")
+    def wake_stats(hours: int = 24) -> dict:
+        """깨우기가 얼마나 닿았나. 판정에는 안 쓰고 보는 데만 쓴다."""
+        registry = LocalRegistry(registry_path)
+        try:
+            since = (
+                datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 720)))
+            ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            return {"since": since, "kinds": registry.wake_stats(since)}
+        finally:
+            registry.close()
 
     @app.get("/api/state")
     def state(project_id: str = "local") -> dict:
