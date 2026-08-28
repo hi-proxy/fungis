@@ -727,3 +727,32 @@ def test_a_file_outside_git_still_opens(tmp_path):
     seen = read_repository_file(str(plain), "note.txt")
     assert seen["lines"] == ["hello"]
     assert seen["branch"] is None
+
+
+def test_every_route_is_still_there(tmp_path):
+    """라우트 목록을 고정한다.
+
+    엔드포인트 쉰다섯 개가 한 함수 안에 있어서, 주제별로 옮길 때 하나가 조용히
+    빠져도 알 방법이 없다. 없어진 경로는 앱이 그 화면을 열 때까지 아무 소리도
+    안 낸다.
+
+    새 경로를 더할 때 이 목록도 같이 늘리면 된다 — 그 손이 곧 '무엇을 공개하고
+    있나' 를 한 번 보게 만든다.
+    """
+    app = create_web_app(tmp_path / "node.db", cmux=FakeCmux())
+    routes = sorted(
+        f"{sorted(route.methods)[0]} {route.path}"
+        for route in app.routes
+        if getattr(route, "methods", None) and route.path.startswith(("/api", "/health"))
+    )
+    assert len(routes) == 52, "\n".join(routes)
+    # 화면과 에이전트가 실제로 부르는 것들. 이름이 바뀌면 조용히 깨진다.
+    for path in (
+        "GET /health",
+        "GET /api/state",
+        "GET /api/projects",
+        "GET /api/wake-stats",
+        "POST /api/messages",
+        "GET /api/projects/{project_id}/file",
+    ):
+        assert path in routes, path
