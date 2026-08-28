@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import sys
@@ -1350,249 +1351,328 @@ def write_error_message(error: Exception) -> str:
     )
 
 
+@dataclass
+class Ctx:
+    """한 명령이 도는 데 필요한 것 전부.
+
+    `main()` 이 열두 갈래로 늘어져 있어서 어느 갈래가 무엇을 쓰는지 밖에서
+    안 보였고, 한 갈래를 고치려면 250 줄을 지나야 했다. 갈래마다 함수를 두면
+    그 함수만 읽으면 된다.
+
+    본문은 옮기면서 한 글자도 안 바꿨다 — 이름을 그대로 풀어 주는 첫 줄이
+    그것을 가능하게 한다.
+    """
+
+    args: argparse.Namespace
+    config: dict
+    registry: LocalRegistry
+    binding: dict
+    adapter: TerminalAdapter
+
+
+def cmd_init(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    client = PMClient(config["server"], registry, workspace_id=args.project)
+    value = client.project_bootstrap(
+        args.project, binding["principal_id"]
+    )
+    registry.set_state(f"active_project:{binding['principal_id']}", args.project)
+    print(format_bootstrap(value))
+
+
+def cmd_inbox(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    messages = InboxWatcher(
+        config["server"], binding["principal_id"], registry
+    ).read_messages(binding["surface_id"])
+    emit_inbox(
+        messages,
+        sender_labels(
+            PMClient(
+                config["server"], registry,
+                workspace_id=active_project(
+                    registry, binding["principal_id"]
+                ),
+                caller_id=binding["principal_id"],
+            ),
+            messages,
+        ) if messages else {},
+    )
+    # 여러 방에서 왔으면 기본 목적지를 건드리지 않는다. 마지막 것으로
+    # 뒤집으면, 다른 방 얘기를 하려던 답장이 방금 읽은 방으로 간다.
+    # 방이 하나뿐일 때만 따라간다.
+    rooms = {
+        message.get("workspace_id")
+        for message in messages
+        if message.get("workspace_id")
+    }
+    # HQ 로는 안 따라간다. HQ 방송은 lead 전원이 받으므로, 따라가면
+    # 방송 한 번에 모든 lead 의 활성 방이 HQ 로 뒤집힌다. 그 뒤의 맨
+    # reply 는 자기 방 대신 HQ 에 붙고 board add 는 HQ 트랙을 노린다.
+    # lead 는 자기 방에 서서 HQ 를 읽는 것이지 HQ 로 이사가는 것이 아니다.
+    if len(rooms) == 1 and (room := rooms.pop()) != "hq":
+        registry.set_state(
+            f"active_project:{binding['principal_id']}", room
+        )
+
+
+def cmd_state(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    client = PMClient(
+        config["server"], registry,
+        workspace_id=active_project(registry, binding["principal_id"]),
+        caller_id=binding["principal_id"],
+    )
+    print(read_state(client, binding, args.project))
+
+
+def cmd_history(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    if not 1 <= args.count <= 500:
+        raise RuntimeError("history count must be between 1 and 500")
+    mine = active_project(registry, binding["principal_id"])
+    # 에이전트가 자기 이름으로 읽는다. PM 이름을 빌리면 아무 방이나
+    # 열린다.
+    client = PMClient(
+        config["server"], registry, workspace_id=mine,
+        caller_id=binding["principal_id"],
+    )
+    workspace_id = resolve_project(client, args.project, mine)
+    client.workspace_id = workspace_id
+    if args.ref:
+        # 번호 여러 개를 한 번에 받는다. 밀려 있던 것을 훑을 때 한 건씩
+        # 왕복하면 그 자체가 소음이다. 방 번호 순으로 돌려준다 — 친
+        # 순서가 아니라 방에서 일어난 순서로 읽는 것이 맞다.
+        messages = [client.message(ref) for ref in sorted(set(args.ref))]
+    else:
+        messages = client.timeline(args.count, after_project_seq=args.after)
+    print(
+        json.dumps(
+            compact_history(
+                workspace_id, messages,
+                sender_labels(client, messages) if messages else {},
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def cmd_overview(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    client = PMClient(
+        config["server"], registry,
+        workspace_id=active_project(registry, binding["principal_id"]),
+        caller_id=binding["principal_id"],
+    )
+    print(render_overview(client.overview(str(binding["principal_id"]))))
+
+
+def cmd_ask(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    mine = active_project(registry, binding["principal_id"])
+    client = PMClient(
+        config["server"], registry,
+        workspace_id=resolve_project(
+            PMClient(config["server"], registry, workspace_id=mine,
+                     caller_id=binding["principal_id"]),
+            args.project, mine,
+        ),
+        caller_id=binding["principal_id"],
+    )
+    print(render_ask(client, binding, args))
+
+
+def cmd_board(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    client = PMClient(
+        config["server"], registry,
+        caller_id=binding["principal_id"],
+    )
+    board = client.board()
+    mine = active_project(registry, binding["principal_id"])
+    if args.board_command == "add":
+        node = client.create_board_node(
+            project_id=mine, title=" ".join(args.title),
+        )
+        print(ticket_line(client.board(), node["id"]))
+    elif args.board_command in ("start", "done"):
+        status = "active" if args.board_command == "start" else "done"
+        node_id = resolve_ticket(board, args.ticket, mine)
+        client.update_board_node(node_id, status=status)
+        print(ticket_line(client.board(), node_id))
+    elif args.board_command in ("wait", "unwait"):
+        node_id = resolve_ticket(board, args.ticket, mine)
+        blocker_id = resolve_ticket(board, args.blocker, mine)
+        if args.board_command == "wait":
+            client.link_board_nodes(node_id=node_id, waits_for=blocker_id)
+        else:
+            client.unlink_board_nodes(node_id=node_id, waits_for=blocker_id)
+        print(ticket_line(client.board(), node_id))
+    else:
+        print(render_board(board, you=mine, role=own_role_name(binding)))
+
+
+def cmd_permission_gate(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    print(json.dumps(permission_gate(config, registry, binding, args.wait)))
+
+
+def cmd_permission_clear(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    print(json.dumps(permission_clear(config, registry, binding)))
+
+
+def cmd_reply(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    if args.command == "reply":
+        in_reply_to = reply_reference(args.ref)
+        given_project = None
+    else:
+        in_reply_to = args.reply
+        given_project = args.project
+    mine = active_project(registry, binding["principal_id"])
+    client = PMClient(
+        config["server"], registry, workspace_id=mine,
+        caller_id=binding["principal_id"],
+    )
+    client.workspace_id = resolve_project(client, given_project, mine)
+    role_ids, direct, cc, cc_ids = addressing(client, args)
+    if not role_ids and not direct:
+        direct = default_recipients(client, args.command)
+    result = client.send_as(
+        binding["local_name"], None, " ".join(args.body),
+        recipient_ids=direct,
+        role_ids=role_ids,
+        reference_ids=cc,
+        absolute_reference_ids=cc_ids,
+        kind="pm_request" if args.command == "request" else "message",
+        reply_level=args.level if args.command == "request" else "r1",
+        answers=getattr(args, "answer", None),
+        in_reply_to_project_seq=in_reply_to,
+        track=args.track,
+        tags=args.tag,
+        inherit_context=not args.no_inherit_context,
+        later=args.later,
+    )
+    warn_if_nobody_received(result, role_ids)
+    print(json.dumps(
+        stored_echo(result, roles=role_ids, in_reply_to=in_reply_to),
+        ensure_ascii=False,
+    ))
+
+
+def cmd_wake(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    me = binding["local_name"]
+    if args.cancel:
+        registry.clear_wake_schedule(me)
+        print(json.dumps({"wake": {"scheduled": None}}, ensure_ascii=False))
+    else:
+        seconds = 0 if args.now else parse_delay(args.delay)
+        due = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        booked = registry.schedule_wake(
+            me,
+            stamp(due),
+            args.note,
+        )
+        deferrals = int(booked.get("deferrals") or 1)
+        print(json.dumps({
+            "wake": {
+                "scheduled": booked.get("due_at"),
+                "in_seconds": seconds,
+                "note": booked.get("note"),
+                # 진전 없이 반복해서 미루는 것은 그 자체가 막힘 신호다.
+                # 세어서 돌려주면 미루는 쪽이 자기가 몇 번째인지 안다.
+                "deferrals": deferrals,
+            }
+        }, ensure_ascii=False))
+        if deferrals >= 3:
+            print(
+                f"{deferrals}번째로 미뤘다. 진전이 없으면 미루지 말고 "
+                "서서 보고하라.",
+                file=sys.stderr,
+            )
+
+
+def cmd_shared(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    values = PMClient(
+        config["server"], registry,
+        workspace_id=active_project(registry, binding["principal_id"]),
+    ).shared(args.keys)
+    found = {item["key"] for item in values}
+    print(
+        json.dumps(
+            {
+                "shared": {
+                    item["key"]: item["value"] for item in values
+                },
+                "missing": [key for key in args.keys if key not in found],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def cmd_work(ctx: Ctx) -> None:
+    args, config, registry, binding = ctx.args, ctx.config, ctx.registry, ctx.binding
+    client = PMClient(
+        config["server"], registry,
+        workspace_id=active_project(registry, binding["principal_id"]),
+    )
+    text = " ".join(args.text)
+    if args.work_command == "start":
+        result = client.start_work(binding["local_name"], text)
+    else:
+        result = client.update_work(
+            binding["local_name"],
+            text,
+            done=args.work_command == "done",
+        )
+    print(
+        json.dumps(
+            {
+                "work": result["id"],
+                "status": result["status"],
+                "elapsed_seconds": result["elapsed_seconds"],
+                "token_usage": result["token_usage"],
+            }
+        )
+    )
+
+
+COMMANDS = {
+    "init": cmd_init,
+    "inbox": cmd_inbox,
+    "state": cmd_state,
+    "history": cmd_history,
+    "overview": cmd_overview,
+    "ask": cmd_ask,
+    "board": cmd_board,
+    "permission-gate": cmd_permission_gate,
+    "permission-clear": cmd_permission_clear,
+    "reply": cmd_reply,
+    "send": cmd_reply,
+    "request": cmd_reply,
+    "wake": cmd_wake,
+    "shared": cmd_shared,
+}
+
+
 def main(argv: list[str] | None = None) -> None:
     # 인자를 받는다. 안 주면 종전처럼 sys.argv 를 읽으므로 실행 방식은 그대로고,
-    # 주면 명령 하나를 그 자리에서 돌려볼 수 있다 — 이게 없으면 12 개 분기 중
-    # 무엇도 테스트가 못 짚는다.
+    # 주면 명령 하나를 그 자리에서 돌려볼 수 있다.
     args = parser().parse_args(argv)
     try:
         config = load_config()
         registry = LocalRegistry(Path(config["registry"]))
         adapter = open_terminal_adapter()
         binding = current_binding(registry, adapter)
-        if args.command == "init":
-            client = PMClient(config["server"], registry, workspace_id=args.project)
-            value = client.project_bootstrap(
-                args.project, binding["principal_id"]
-            )
-            registry.set_state(f"active_project:{binding['principal_id']}", args.project)
-            print(format_bootstrap(value))
-        elif args.command == "inbox":
-            messages = InboxWatcher(
-                config["server"], binding["principal_id"], registry
-            ).read_messages(binding["surface_id"])
-            emit_inbox(
-                messages,
-                sender_labels(
-                    PMClient(
-                        config["server"], registry,
-                        workspace_id=active_project(
-                            registry, binding["principal_id"]
-                        ),
-                        caller_id=binding["principal_id"],
-                    ),
-                    messages,
-                ) if messages else {},
-            )
-            # 여러 방에서 왔으면 기본 목적지를 건드리지 않는다. 마지막 것으로
-            # 뒤집으면, 다른 방 얘기를 하려던 답장이 방금 읽은 방으로 간다.
-            # 방이 하나뿐일 때만 따라간다.
-            rooms = {
-                message.get("workspace_id")
-                for message in messages
-                if message.get("workspace_id")
-            }
-            # HQ 로는 안 따라간다. HQ 방송은 lead 전원이 받으므로, 따라가면
-            # 방송 한 번에 모든 lead 의 활성 방이 HQ 로 뒤집힌다. 그 뒤의 맨
-            # reply 는 자기 방 대신 HQ 에 붙고 board add 는 HQ 트랙을 노린다.
-            # lead 는 자기 방에 서서 HQ 를 읽는 것이지 HQ 로 이사가는 것이 아니다.
-            if len(rooms) == 1 and (room := rooms.pop()) != "hq":
-                registry.set_state(
-                    f"active_project:{binding['principal_id']}", room
-                )
-        elif args.command == "state":
-            client = PMClient(
-                config["server"], registry,
-                workspace_id=active_project(registry, binding["principal_id"]),
-                caller_id=binding["principal_id"],
-            )
-            print(read_state(client, binding, args.project))
-        elif args.command == "history":
-            if not 1 <= args.count <= 500:
-                raise RuntimeError("history count must be between 1 and 500")
-            mine = active_project(registry, binding["principal_id"])
-            # 에이전트가 자기 이름으로 읽는다. PM 이름을 빌리면 아무 방이나
-            # 열린다.
-            client = PMClient(
-                config["server"], registry, workspace_id=mine,
-                caller_id=binding["principal_id"],
-            )
-            workspace_id = resolve_project(client, args.project, mine)
-            client.workspace_id = workspace_id
-            if args.ref:
-                # 번호 여러 개를 한 번에 받는다. 밀려 있던 것을 훑을 때 한 건씩
-                # 왕복하면 그 자체가 소음이다. 방 번호 순으로 돌려준다 — 친
-                # 순서가 아니라 방에서 일어난 순서로 읽는 것이 맞다.
-                messages = [client.message(ref) for ref in sorted(set(args.ref))]
-            else:
-                messages = client.timeline(args.count, after_project_seq=args.after)
-            print(
-                json.dumps(
-                    compact_history(
-                        workspace_id, messages,
-                        sender_labels(client, messages) if messages else {},
-                    ),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
-        elif args.command == "overview":
-            client = PMClient(
-                config["server"], registry,
-                workspace_id=active_project(registry, binding["principal_id"]),
-                caller_id=binding["principal_id"],
-            )
-            print(render_overview(client.overview(str(binding["principal_id"]))))
-        elif args.command == "ask":
-            mine = active_project(registry, binding["principal_id"])
-            client = PMClient(
-                config["server"], registry,
-                workspace_id=resolve_project(
-                    PMClient(config["server"], registry, workspace_id=mine,
-                             caller_id=binding["principal_id"]),
-                    args.project, mine,
-                ),
-                caller_id=binding["principal_id"],
-            )
-            print(render_ask(client, binding, args))
-        elif args.command == "board":
-            client = PMClient(
-                config["server"], registry,
-                caller_id=binding["principal_id"],
-            )
-            board = client.board()
-            mine = active_project(registry, binding["principal_id"])
-            if args.board_command == "add":
-                node = client.create_board_node(
-                    project_id=mine, title=" ".join(args.title),
-                )
-                print(ticket_line(client.board(), node["id"]))
-            elif args.board_command in ("start", "done"):
-                status = "active" if args.board_command == "start" else "done"
-                node_id = resolve_ticket(board, args.ticket, mine)
-                client.update_board_node(node_id, status=status)
-                print(ticket_line(client.board(), node_id))
-            elif args.board_command in ("wait", "unwait"):
-                node_id = resolve_ticket(board, args.ticket, mine)
-                blocker_id = resolve_ticket(board, args.blocker, mine)
-                if args.board_command == "wait":
-                    client.link_board_nodes(node_id=node_id, waits_for=blocker_id)
-                else:
-                    client.unlink_board_nodes(node_id=node_id, waits_for=blocker_id)
-                print(ticket_line(client.board(), node_id))
-            else:
-                print(render_board(board, you=mine, role=own_role_name(binding)))
-        elif args.command == "permission-gate":
-            print(json.dumps(permission_gate(config, registry, binding, args.wait)))
-        elif args.command == "permission-clear":
-            print(json.dumps(permission_clear(config, registry, binding)))
-        elif args.command in ("reply", "send", "request"):
-            if args.command == "reply":
-                in_reply_to = reply_reference(args.ref)
-                given_project = None
-            else:
-                in_reply_to = args.reply
-                given_project = args.project
-            mine = active_project(registry, binding["principal_id"])
-            client = PMClient(
-                config["server"], registry, workspace_id=mine,
-                caller_id=binding["principal_id"],
-            )
-            client.workspace_id = resolve_project(client, given_project, mine)
-            role_ids, direct, cc, cc_ids = addressing(client, args)
-            if not role_ids and not direct:
-                direct = default_recipients(client, args.command)
-            result = client.send_as(
-                binding["local_name"], None, " ".join(args.body),
-                recipient_ids=direct,
-                role_ids=role_ids,
-                reference_ids=cc,
-                absolute_reference_ids=cc_ids,
-                kind="pm_request" if args.command == "request" else "message",
-                reply_level=args.level if args.command == "request" else "r1",
-                answers=getattr(args, "answer", None),
-                in_reply_to_project_seq=in_reply_to,
-                track=args.track,
-                tags=args.tag,
-                inherit_context=not args.no_inherit_context,
-                later=args.later,
-            )
-            warn_if_nobody_received(result, role_ids)
-            print(json.dumps(
-                stored_echo(result, roles=role_ids, in_reply_to=in_reply_to),
-                ensure_ascii=False,
-            ))
-        elif args.command == "wake":
-            me = binding["local_name"]
-            if args.cancel:
-                registry.clear_wake_schedule(me)
-                print(json.dumps({"wake": {"scheduled": None}}, ensure_ascii=False))
-            else:
-                seconds = 0 if args.now else parse_delay(args.delay)
-                due = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-                booked = registry.schedule_wake(
-                    me,
-                    stamp(due),
-                    args.note,
-                )
-                deferrals = int(booked.get("deferrals") or 1)
-                print(json.dumps({
-                    "wake": {
-                        "scheduled": booked.get("due_at"),
-                        "in_seconds": seconds,
-                        "note": booked.get("note"),
-                        # 진전 없이 반복해서 미루는 것은 그 자체가 막힘 신호다.
-                        # 세어서 돌려주면 미루는 쪽이 자기가 몇 번째인지 안다.
-                        "deferrals": deferrals,
-                    }
-                }, ensure_ascii=False))
-                if deferrals >= 3:
-                    print(
-                        f"{deferrals}번째로 미뤘다. 진전이 없으면 미루지 말고 "
-                        "서서 보고하라.",
-                        file=sys.stderr,
-                    )
-        elif args.command == "shared":
-            values = PMClient(
-                config["server"], registry,
-                workspace_id=active_project(registry, binding["principal_id"]),
-            ).shared(args.keys)
-            found = {item["key"] for item in values}
-            print(
-                json.dumps(
-                    {
-                        "shared": {
-                            item["key"]: item["value"] for item in values
-                        },
-                        "missing": [key for key in args.keys if key not in found],
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        else:
-            client = PMClient(
-                config["server"], registry,
-                workspace_id=active_project(registry, binding["principal_id"]),
-            )
-            text = " ".join(args.text)
-            if args.work_command == "start":
-                result = client.start_work(binding["local_name"], text)
-            else:
-                result = client.update_work(
-                    binding["local_name"],
-                    text,
-                    done=args.work_command == "done",
-                )
-            print(
-                json.dumps(
-                    {
-                        "work": result["id"],
-                        "status": result["status"],
-                        "elapsed_seconds": result["elapsed_seconds"],
-                        "token_usage": result["token_usage"],
-                    }
-                )
-            )
+        # 표에 없는 것은 work 하위 명령이다. 그쪽은 args.work_command 로 다시 갈린다.
+        COMMANDS.get(args.command, cmd_work)(
+            Ctx(args, config, registry, binding, adapter)
+        )
     except PMServerError as error:
         if "args" in locals() and args.command in {"reply", "send", "request"}:
             raise SystemExit(write_error_message(error)) from error
