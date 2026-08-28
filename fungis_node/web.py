@@ -26,6 +26,7 @@ from .context_detection import commit_candidates, detect_contexts
 from .git_context import inspect_git_context, is_verified_commit
 from .pm import PMClient
 from .registry import LocalRegistry
+from .routes_board import register_board_routes
 from .supervisor import GATE_TICK_KEY
 from .tui import ConnectionController
 
@@ -232,28 +233,8 @@ class RolePayload(BaseModel):
     onboarding_prompt: str = Field(default="", max_length=20000)
 
 
-class TrackLinkPayload(BaseModel):
-    hq_id: str = Field(min_length=1)
-
-
 class RoleLeadPayload(BaseModel):
     is_lead: bool
-
-
-class BoardNodePayload(BaseModel):
-    project_id: str = Field(min_length=1)
-    title: str = Field(min_length=1, max_length=200)
-    status: str = Field(default="todo", pattern="^(todo|active|done)$")
-
-
-class BoardNodeUpdatePayload(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
-    status: str | None = Field(default=None, pattern="^(todo|active|done)$")
-
-
-class BoardEdgePayload(BaseModel):
-    node_id: str = Field(min_length=1)
-    waits_for: str = Field(min_length=1)
 
 
 class RoleAssignmentPayload(BaseModel):
@@ -671,78 +652,6 @@ def create_web_app(
     # 보드는 앱 스냅샷에 넣지 않는다. 스냅샷은 방 하나를 통째로 다시 만들고
     # 지문을 비교해 흘려보내는 구조라, 보드를 거기 넣으면 한 글자 바뀔 때마다
     # 열려 있는 모든 방 스트림이 전량 재전송된다.
-
-    @app.get("/api/board")
-    def read_board() -> dict:
-        try:
-            with client() as pm:
-                hq = pm.hq()
-                return {
-                    "hq": hq,
-                    "tracks": pm.board() if hq else [],
-                    # 소집 화면이 한 번만 부르면 되게 같이 싣는다.
-                    "candidates": pm.board_candidates(),
-                }
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.put("/api/board/tracks/{project_id}")
-    def connect_track(project_id: str, payload: TrackLinkPayload) -> dict:
-        try:
-            with client() as pm:
-                return pm.connect_project(project_id, payload.hq_id)
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.delete("/api/board/tracks/{project_id}", status_code=204)
-    def disconnect_track(project_id: str) -> None:
-        try:
-            with client() as pm:
-                pm.disconnect_project(project_id)
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.post("/api/board/nodes", status_code=201)
-    def create_board_node(payload: BoardNodePayload) -> dict:
-        try:
-            with client() as pm:
-                return pm.create_board_node(
-                    payload.project_id, payload.title.strip(), payload.status
-                )
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.patch("/api/board/nodes/{node_id}")
-    def update_board_node(node_id: str, payload: BoardNodeUpdatePayload) -> dict:
-        try:
-            with client() as pm:
-                return pm.update_board_node(node_id, payload.title, payload.status)
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.delete("/api/board/nodes/{node_id}", status_code=204)
-    def delete_board_node(node_id: str) -> None:
-        try:
-            with client() as pm:
-                pm.delete_board_node(node_id)
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.post("/api/board/edges", status_code=201)
-    def link_board_nodes(payload: BoardEdgePayload) -> dict:
-        try:
-            with client() as pm:
-                return pm.link_board_nodes(payload.node_id, payload.waits_for)
-        except Exception as error:
-            raise fail(error) from error
-
-    @app.delete("/api/board/edges", status_code=204)
-    def unlink_board_nodes(node_id: str, waits_for: str) -> None:
-        try:
-            with client() as pm:
-                pm.unlink_board_nodes(node_id, waits_for)
-        except Exception as error:
-            raise fail(error) from error
 
     @app.put("/api/roles/{role_id}/lead")
     def set_role_lead(role_id: str, payload: RoleLeadPayload) -> dict:
@@ -1182,6 +1091,9 @@ def create_web_app(
         finally:
             registry.close()
 
+    # 보드는 제 파일로 나갔다. 여기서 붙인다 — 붙이는 자리가 흩어지면
+    # 어느 라우터가 실제로 얹혔는지 읽어서 알 수 없다.
+    register_board_routes(app, client, fail)
     return app
 
 
