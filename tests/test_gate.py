@@ -283,7 +283,7 @@ def test_unconfirmed_wake_does_not_deafen_forever(tmp_path, monkeypatch):
     메시지 5건을 막고 있었다. 다시 깨우는 쪽은 안전하다 — 호출문 한 줄이고
     게이트가 빈 프롬프트를 확인한 뒤에만 넣는다.
     """
-    from fungis_node import registry as registry_module
+    from fungis_node import delivery as registry_module
 
     registry = LocalRegistry(tmp_path / "node.db")
     current = candidate("idle")
@@ -358,7 +358,7 @@ def test_a_wake_waits_out_its_hold_but_a_new_message_does_not(tmp_path, monkeypa
     통째로 사라져서 읽기 전까지 주기마다 나간다 — 실측에서 24초 사이에 두 번
     나갔다. 반대로 새 메시지까지 막으면 새로 온 말이 한도만큼 늦는다.
     """
-    from fungis_node import registry as registry_module
+    from fungis_node import delivery as registry_module
 
     registry = LocalRegistry(tmp_path / "node.db")
     current = candidate("idle")
@@ -389,7 +389,7 @@ def test_a_wake_waits_out_its_hold_but_a_new_message_does_not(tmp_path, monkeypa
 
 def test_a_stalled_wake_is_counted_so_it_can_be_told_later(tmp_path, monkeypatch):
     """깨우기 줄은 다음 것이 덮어쓴다. 세어 두지 않으면 몇 번 갇혔는지 남지 않는다."""
-    from fungis_node import registry as registry_module
+    from fungis_node import delivery as registry_module
 
     registry = LocalRegistry(tmp_path / "node.db")
     registry.attach("agent-1", candidate("idle"))
