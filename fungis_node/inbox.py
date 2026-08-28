@@ -77,6 +77,16 @@ class InboxWatcher:
                 binding["agent_session_id"],
             )
             return messages
+        if existing_claim:
+            # **받아 간 기록은 있는데 볼 것이 없다.** 앞서 넘겨준 것을 확인만
+            # 못 보낸 상태다. 그 claim 이 `after` 를 밀어 올리고 있어서, 서버가
+            # 미처리로 들고 있는 바로 그 메시지가 여기서는 영영 안 나온다.
+            #
+            # 게이트는 서버 쪽만 보므로 깨울 것이 있다고 판단해 계속 깨우고,
+            # 깨어나서 읽으면 또 빈 목록이다. 확인 하나가 유실되면 그 자리에서
+            # 끝나는 게 아니라 **깨우기가 멈추지 않는다.**
+            self.ack_processed(int(existing_claim["through_seq"]))
+            return messages
         # 볼 것이 없으면 그 깨우기는 소진된 것이다. 안 지우면 게이트가
         # wake_unconfirmed 로 이후 깨우기를 TTL 10분 동안 전부 거부한다.
         #

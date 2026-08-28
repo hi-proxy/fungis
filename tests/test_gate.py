@@ -384,6 +384,48 @@ def test_an_empty_read_clears_the_wake_it_answered(tmp_path, monkeypatch):
     registry.close()
 
 
+def test_a_claim_with_nothing_to_read_is_acknowledged(tmp_path, monkeypatch):
+    """확인 하나가 유실되면 깨우기가 멈추지 않는다.
+
+    claim 이 `after` 를 밀어 올려서, 서버가 미처리로 들고 있는 그 메시지가
+    여기서는 영영 안 나온다. 게이트는 서버 쪽만 보고 계속 깨우고, 깨어나서
+    읽으면 또 빈 목록이다. 2026-08-28 에 그 창이 그렇게 돌았다.
+    """
+    from fungis_node.cmux import CmuxAgentCandidate
+    from fungis_node.inbox import InboxWatcher
+    from fungis_node.registry import LocalRegistry
+
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach("agent-1", CmuxAgentCandidate(
+        provider="claude", agent_session_id="session-1", surface_id="surface-1",
+        surface_ref="surface:1", workspace_ref="workspace:1", title="Agent",
+        tty="ttys001", cwd="/project", lifecycle="idle",
+        binding_verified=True, verification_reason="agent_tty_matches_surface",
+    ))
+    registry.claim_inbox("agent-1", 9, "session-1")
+    registry.record_event({
+        "event_id": "event-9", "event_seq": 9, "recipient_id": "agent-1",
+        "through_seq": 9, "kind": "inbox_available",
+    })
+
+    acked = []
+    watcher = InboxWatcher("http://127.0.0.1:8787", "agent-1", registry)
+    monkeypatch.setattr(
+        InboxWatcher, "_http_get",
+        lambda self, path, params: {"processed_seq": 0} if "state" in path else [],
+    )
+    monkeypatch.setattr(
+        InboxWatcher, "_http_post",
+        lambda self, path, payload: acked.append(payload) or {"pending_count": 0},
+    )
+    assert watcher.read_messages("surface-1") == []
+
+    assert acked == [{"recipient_id": "agent-1", "through_seq": 9}]
+    assert registry.claim("agent-1") is None
+    assert registry.pending_summary("agent-1")["pending_count"] == 0
+    registry.close()
+
+
 def _bound(tmp_path):
     from fungis_node.cmux import CmuxAgentCandidate
     from fungis_node.registry import LocalRegistry

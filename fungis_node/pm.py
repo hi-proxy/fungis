@@ -438,9 +438,10 @@ class PMClient:
         assert isinstance(result, list)
         return result
 
-    def roles(self) -> list[dict]:
+    def roles(self, workspace_id: str | None = None) -> list[dict]:
+        target = workspace_id or self.workspace_id
         result = self._request(
-            "GET", f"/v1/workspaces/{urllib.parse.quote(self.workspace_id)}/roles"
+            "GET", f"/v1/workspaces/{urllib.parse.quote(target)}/roles"
         )
         assert isinstance(result, list)
         return result

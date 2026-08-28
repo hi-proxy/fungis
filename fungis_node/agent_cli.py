@@ -630,13 +630,50 @@ def display_seq(message: dict) -> int:
 CHAIN_NOTICE = 5
 
 
-def emit_inbox(messages: list[dict]) -> None:
+def sender_labels(client, messages: list[dict]) -> dict[tuple[str, str], str]:
+    """발신자를 **그 방에서의 자리**로 부른다.
+
+    세션 이름(`front2` 같은 것)은 PM 이 제 창을 구분하려고 붙인 꼬리표다.
+    에이전트는 그 이름으로 상대를 부를 수도 없다 — `--to` 는 역할만 받는다.
+    보이는 이름과 부를 수 있는 이름이 다르면 그 자리에서 어긋난다.
+
+    역할로 부르면 누가 앉아 있는지 몰라도 된다. 자리는 남고 사람은 바뀐다.
+    """
+    labels: dict[tuple[str, str], str] = {}
+    rooms = {
+        str(message["workspace_id"]) for message in messages
+        if message.get("workspace_id")
+    }
+    for workspace_id in rooms:
+        try:
+            roles = client.roles(workspace_id)
+        except PMServerError:
+            # 이름을 못 얻는다고 메시지를 못 읽을 이유는 없다.
+            continue
+        for role in roles:
+            agent_id = role.get("agent_id")
+            if agent_id:
+                labels[(workspace_id, str(agent_id))] = str(role["name"])
+    return labels
+
+
+def speaker(message: dict, labels: dict[tuple[str, str], str]) -> str:
+    key = (str(message.get("workspace_id") or ""), str(message["sender_id"]))
+    # PM 은 방 안의 자리가 아니라 그 위의 위계다. 역할이 없는 것이 아니라
+    # 역할 층에서 찾을 것이 아니고, display_name 이 이미 그 이름이다.
+    return labels.get(key) or message.get("sender_name") or str(message["sender_id"])
+
+
+def emit_inbox(
+    messages: list[dict], labels: dict[tuple[str, str], str] | None = None
+) -> None:
+    labels = labels or {}
     payload = {
         "messages": [
             {
                 "seq": display_seq(message),
                 "project": message.get("workspace_id"),
-                "from": message.get("sender_name", message["sender_id"]),
+                "from": speaker(message, labels),
                 # 나에게 온 말인지 옆에서 듣는 말인지. 이 구분이 없으면 참조로
                 # 받은 것까지 지시로 읽고 조사에 들어간다.
                 "for_me": not message.get("is_reference"),
@@ -1197,7 +1234,11 @@ def _quote(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
 
 
-def compact_history(project_id: str, messages: list[dict]) -> dict:
+def compact_history(
+    project_id: str, messages: list[dict],
+    labels: dict[tuple[str, str], str] | None = None,
+) -> dict:
+    labels = labels or {}
     items = []
     for message in messages:
         role_agent_ids = {
@@ -1215,7 +1256,7 @@ def compact_history(project_id: str, messages: list[dict]) -> dict:
             {
                 "seq": display_seq(message),
                 "at": message["created_at"],
-                "from": message["sender_name"],
+                "from": speaker(message, labels),
                 "to": to,
                 "body": message["body"],
                 "kind": message["kind"],
@@ -1326,7 +1367,19 @@ def main() -> None:
             messages = InboxWatcher(
                 config["server"], binding["principal_id"], registry
             ).read_messages(binding["surface_id"])
-            emit_inbox(messages)
+            emit_inbox(
+                messages,
+                sender_labels(
+                    PMClient(
+                        config["server"], registry,
+                        workspace_id=active_project(
+                            registry, binding["principal_id"]
+                        ),
+                        caller_id=binding["principal_id"],
+                    ),
+                    messages,
+                ) if messages else {},
+            )
             # 여러 방에서 왔으면 기본 목적지를 건드리지 않는다. 마지막 것으로
             # 뒤집으면, 다른 방 얘기를 하려던 답장이 방금 읽은 방으로 간다.
             # 방이 하나뿐일 때만 따라간다.
@@ -1371,7 +1424,10 @@ def main() -> None:
                 messages = client.timeline(args.count, after_project_seq=args.after)
             print(
                 json.dumps(
-                    compact_history(workspace_id, messages),
+                    compact_history(
+                        workspace_id, messages,
+                        sender_labels(client, messages) if messages else {},
+                    ),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
