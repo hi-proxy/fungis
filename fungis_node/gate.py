@@ -126,7 +126,16 @@ class IdleGate:
                 eligible=True, reason="scheduled",
                 would_send=self.due_text, **common,
             )
-        if self.registry.outstanding_wake(recipient_id) is not None:
+        # 같은 자리를 두 번 찌르지 않으려는 규칙이다. 그런데 **찌를 자리가
+        # 비어 있으면 두 번이 아니다** — 앞의 깨우기를 못 봤거나 보고도 인박스를
+        # 안 돈 창은 지금 놀고 있고, 그런 창은 한도가 다 갈 때까지 아무 말도
+        # 못 듣는다. 가만히 있는데 수신이 끊기는 것이 그래서였다.
+        #
+        # 화면을 여기서 직접 본다. 위쪽 검사는 lifecycle 이 idle 이면 화면을
+        # 건너뛰는데, 그 값은 cmux 가 적는 것이라 믿고 넘길 수 없다.
+        if self.registry.outstanding_wake(
+            recipient_id
+        ) is not None and not self.adapter.prompt_ready(binding["surface_id"]):
             return GateDecision(
                 eligible=False, reason="wake_unconfirmed", **common
             )

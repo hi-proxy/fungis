@@ -54,7 +54,11 @@ CREATE TABLE IF NOT EXISTS wake_attempts (
     through_seq INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('sent', 'processed', 'superseded')),
     sent_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    processed_at TEXT
+    processed_at TEXT,
+    -- 이 줄은 깨우기마다 덮어쓰인다. 한도가 다 가도록 확인이 안 온 횟수는
+    -- 그렇게 지워지는데, 그것이 곧 그 창이 몇 번 갇혔나다. 세어 두지 않으면
+    -- 다음에 같은 얘기가 나와도 몇 번인지 댈 수가 없다.
+    stalled_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS inbox_claims (
@@ -156,6 +160,15 @@ class LocalRegistry:
                   FROM wake_attempts_legacy;
                 DROP TABLE wake_attempts_legacy;
                 """
+            )
+        wake_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(wake_attempts)")
+        }
+        if "stalled_count" not in wake_columns:
+            self.connection.execute(
+                "ALTER TABLE wake_attempts"
+                " ADD COLUMN stalled_count INTEGER NOT NULL DEFAULT 0"
             )
         self._ensure_identity()
 
@@ -657,7 +670,8 @@ class LocalRegistry:
         self.connection.execute(
             """
             UPDATE wake_attempts SET status = 'superseded',
-              processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+              stalled_count = stalled_count + 1
             WHERE recipient_id = ? AND status = 'sent'
               -- 한도가 0 이면 '지금 당장 만료' 라는 뜻이다. `<` 로 두면 같은
               -- 밀리초에 보낸 것이 안 잡혀서 그 뜻이 지켜지지 않는다.

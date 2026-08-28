@@ -302,6 +302,45 @@ def test_unconfirmed_wake_does_not_deafen_forever(tmp_path, monkeypatch):
     registry.close()
 
 
+def test_an_idle_screen_is_woken_even_with_a_wake_unconfirmed(tmp_path):
+    """찌를 자리가 비어 있으면 두 번 찌르는 것이 아니다.
+
+    앞의 깨우기를 못 봤거나 보고도 인박스를 안 돈 창은 지금 놀고 있다. 그런
+    창을 한도가 다 갈 때까지 재워 두면, 가만히 있는데 수신만 끊긴다.
+    """
+    registry = LocalRegistry(tmp_path / "node.db")
+    current = candidate("idle")
+    registry.attach("agent-1", current)
+    record_pending(registry)
+
+    cmux = GateCmux(current, prompt_ready=True)
+    gate = IdleGate(registry, cmux, settle_seconds=0)
+    assert gate.run("agent-1", send=True).eligible is True
+    # 확인이 안 왔지만 화면이 비었다. 한도를 기다릴 이유가 없다.
+    assert gate.run("agent-1", send=True).eligible is True
+    assert len(cmux.wakes) == 2
+    registry.close()
+
+
+def test_a_stalled_wake_is_counted_so_it_can_be_told_later(tmp_path, monkeypatch):
+    """깨우기 줄은 다음 것이 덮어쓴다. 세어 두지 않으면 몇 번 갇혔는지 남지 않는다."""
+    from fungis_node import registry as registry_module
+
+    registry = LocalRegistry(tmp_path / "node.db")
+    registry.attach("agent-1", candidate("idle"))
+    principal = registry.binding("agent-1")["principal_id"]
+    registry.record_wake(principal, 7)
+
+    monkeypatch.setattr(registry_module, "WAKE_CONFIRM_TTL_SECONDS", 0)
+    assert registry.outstanding_wake(principal) is None
+    row = registry.connection.execute(
+        "SELECT stalled_count FROM wake_attempts WHERE recipient_id = ?",
+        (principal,),
+    ).fetchone()
+    assert row["stalled_count"] == 1
+    registry.close()
+
+
 def test_an_empty_read_clears_the_wake_it_answered(tmp_path, monkeypatch):
     """볼 것이 없어도 깨우기는 소진된 것이다.
 
