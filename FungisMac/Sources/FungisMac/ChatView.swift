@@ -23,6 +23,7 @@ struct ChatView: View {
     @State private var pinningAfter: ChatMessage?
     @State private var contextFilter: String?
     @State private var activeTimelinePinID: String?
+    @State private var followingPinID: String?
     @State private var flashingTimelinePinID: String?
 
     var body: some View {
@@ -349,12 +350,24 @@ struct ChatView: View {
             jumpPin: { pin in
                 contextFilter = nil
                 Task {
+                    // 어느 핀을 따라가는 중인지 남긴다. 오래된 핀은 옛 메시지를
+                    // 여러 번 거슬러 올라가야 해서 몇 초가 걸리고, 그동안
+                    // 화면이 아무 말도 안 하면 눌리지 않은 것으로 읽힌다.
+                    followingPinID = pin.id
+                    defer { followingPinID = nil }
                     await model.ensureMessageLoaded(pin.afterMessageSeq)
                     await Task.yield()
                     scrollProxy?.scrollTo(pin.afterMessageSeq, anchor: .center)
                     await flashTimelinePin(pin.id)
                 }
             },
+            jumpLatest: {
+                contextFilter = nil
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    scrollProxy?.scrollTo("chat-bottom", anchor: .top)
+                }
+            },
+            loadingPinID: followingPinID,
             jumpBookmark: { bookmark in
                 contextFilter = nil
                 Task {
@@ -1073,6 +1086,11 @@ private struct TimelineSideRail: View {
     let bookmarks: [MessageBookmark]
     let activePinID: String?
     let jumpPin: (TimelinePin) -> Void
+    /// 핀 줄 맨 끝의 노드. 마지막 핀에서 내려온 선이 여기서 닫힌다.
+    let jumpLatest: () -> Void
+    /// 옛 메시지를 거슬러 올라가는 중. 오래된 핀일수록 왕복이 늘어서, 이걸
+    /// 안 보여 주면 누른 쪽은 아무 일도 안 일어난 줄로 안다.
+    let loadingPinID: String?
     let jumpBookmark: (MessageBookmark) -> Void
     let deletePin: (TimelinePin) -> Void
     let deleteBookmark: (MessageBookmark) -> Void
@@ -1093,6 +1111,7 @@ private struct TimelineSideRail: View {
                             ForEach(pins) { pin in
                                 pinRow(pin)
                             }
+                            latestRow()
                         }
                     }
 
@@ -1118,6 +1137,39 @@ private struct TimelineSideRail: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// 핀 줄의 끝. 마지막 핀에서 내려오던 선이 여기서 노드로 닫힌다.
+    ///
+    /// 전에는 그 선이 아무 데서나 끊겼다. 끝에 노드를 두면 줄이 위아래로
+    /// 맞물리고, 그 노드가 하는 일도 자리와 맞는다 — **맨 아래(최신)로 간다.**
+    private func latestRow() -> some View {
+        Button(action: jumpLatest) {
+            HStack(alignment: .top, spacing: 9) {
+                ZStack(alignment: .top) {
+                    // 선은 노드까지만 온다. 지나쳐 내려가면 끝이 아니라 끊긴
+                    // 것으로 보인다.
+                    Rectangle().fill(Color.secondary.opacity(0.18))
+                        .frame(width: 2, height: 10)
+                    Circle().fill(Color(nsColor: .controlBackgroundColor))
+                        .frame(width: 9, height: 9)
+                        .overlay(
+                            Circle().stroke(Color.secondary.opacity(0.55), lineWidth: 1)
+                        )
+                        .padding(.top, 4)
+                }
+                .frame(width: 12, height: 30)
+                Text("최신으로")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 1)
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+    }
+
     private func pinRow(_ pin: TimelinePin) -> some View {
         let active = pin.id == activePinID
         let color = contextColor(pin.label)
@@ -1125,10 +1177,21 @@ private struct TimelineSideRail: View {
             HStack(alignment: .top, spacing: 9) {
                 ZStack(alignment: .top) {
                     Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 2)
-                    Circle().fill(active ? color : Color(nsColor: .controlBackgroundColor))
-                        .frame(width: active ? 11 : 9, height: active ? 11 : 9)
-                        .overlay(Circle().stroke(color, lineWidth: active ? 2 : 1))
-                        .padding(.top, 4)
+                    // 따라가는 중이면 그 노드 자리에서 돈다. 목록 위쪽에 띠를
+                    // 두는 것보다, 누른 자리에서 답하는 편이 무엇을 기다리는지
+                    // 분명하다.
+                    if pin.id == loadingPinID {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.55)
+                            .frame(width: 11, height: 11)
+                            .padding(.top, 3)
+                    } else {
+                        Circle().fill(active ? color : Color(nsColor: .controlBackgroundColor))
+                            .frame(width: active ? 11 : 9, height: active ? 11 : 9)
+                            .overlay(Circle().stroke(color, lineWidth: active ? 2 : 1))
+                            .padding(.top, 4)
+                    }
                 }
                 .frame(width: 12, height: 52)
                 VStack(alignment: .leading, spacing: 4) {
